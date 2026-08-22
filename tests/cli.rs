@@ -319,6 +319,97 @@ fn cavity_resonance() {
     assert!((best.0 - f101).abs() < 0.08e9, "resonance at {} GHz, expected {} GHz", best.0 / 1e9, f101 / 1e9);
 }
 
+// A conductive filling makes the line lossy through eps - j sigma / w eps0,
+// so the propagation constant is k0 sqrt(eps_c) and S21 follows in closed
+// form. Checks that conduction current lands in the right frequency slot.
+#[test]
+fn substrate_conductivity() {
+    let (lx, lyz) = (0.12, 0.01);
+    let mesh = box_msh(
+        "sig.msh",
+        [12, 1, 1],
+        [lx, lyz, lyz],
+        &move |x, _y, z| {
+            if z < 1e-12 || z > lyz - 1e-12 {
+                Some("pec")
+            } else if x < 1e-12 {
+                Some("p1")
+            } else if x > lx - 1e-12 {
+                Some("p2")
+            } else {
+                None
+            }
+        },
+        &|_, _, _| "lossy",
+    );
+    let (f, sigma, er) = (1e9, 0.01, 1.0);
+    let (w, eps0) = (2.0 * std::f64::consts::PI * f, 8.8541878128e-12);
+    // eps_c = er - j sigma / (w eps0), gamma = j k0 sqrt(eps_c)
+    let (re, im) = (er, -sigma / (w * eps0));
+    let r = (re * re + im * im).sqrt().sqrt();
+    let th = im.atan2(re) / 2.0;
+    let (nr, ni) = (r * th.cos(), r * th.sin());
+    let k0 = w / C0;
+    let expect = (k0 * ni * lx).exp();
+    let z0 = ETA0 / nr;
+    let deck = format!(
+        "mesh {}\nmat lossy eps {} sigma {}\npec pec\nport 1 p1 0 0 1 {}\nport 2 p2 0 0 1 {}\nsweep lin {} {} 1\n",
+        mesh.display(),
+        er,
+        sigma,
+        z0,
+        z0,
+        f,
+        f
+    );
+    let v = run("sig.nfm", &deck)[0].1.clone();
+    let got = mag(v[2], v[3]);
+    assert!((got - expect).abs() < 0.01, "S21 = {}, analytic {}", got, expect);
+    assert!(got < 0.95, "conductivity produced no measurable loss");
+}
+
+// Lossy plates instead of PEC: the parallel plate line then attenuates by
+// Rs / (eta h) per unit length with Rs the surface resistance. Checks the
+// sqrt(k0) slot, which is where the skin effect lives.
+#[test]
+fn conductor_loss() {
+    let (lx, lyz) = (0.12, 0.01);
+    let mesh = box_msh(
+        "met.msh",
+        [12, 1, 1],
+        [lx, lyz, lyz],
+        &move |x, _y, z| {
+            if z < 1e-12 || z > lyz - 1e-12 {
+                Some("cu")
+            } else if x < 1e-12 {
+                Some("p1")
+            } else if x > lx - 1e-12 {
+                Some("p2")
+            } else {
+                None
+            }
+        },
+        &|_, _, _| "air",
+    );
+    let (f, sigma) = (1e9, 1e4);
+    let (w, mu0) = (2.0 * std::f64::consts::PI * f, 4e-7 * std::f64::consts::PI);
+    let rs = (w * mu0 / (2.0 * sigma)).sqrt();
+    let expect = (-rs / (ETA0 * lyz) * lx).exp();
+    let deck = format!(
+        "mesh {}\nmetal cu {}\nport 1 p1 0 0 1 {}\nport 2 p2 0 0 1 {}\nsweep lin {} {} 1\n",
+        mesh.display(),
+        sigma,
+        ETA0,
+        ETA0,
+        f,
+        f
+    );
+    let v = run("met.nfm", &deck)[0].1.clone();
+    let got = mag(v[2], v[3]);
+    assert!((got - expect).abs() < 0.01, "S21 = {}, analytic {}", got, expect);
+    assert!(got < 0.99, "metal loss produced no measurable attenuation");
+}
+
 // Runs nanofem and returns stderr, expecting it to refuse the input. A
 // panic message counts as a failure: bad input must produce a diagnostic,
 // never a backtrace.

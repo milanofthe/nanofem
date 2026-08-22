@@ -319,6 +319,61 @@ fn cavity_resonance() {
     assert!((best.0 - f101).abs() < 0.08e9, "resonance at {} GHz, expected {} GHz", best.0 / 1e9, f101 / 1e9);
 }
 
+// Runs nanofem and returns stderr, expecting it to refuse the input. A
+// panic message counts as a failure: bad input must produce a diagnostic,
+// never a backtrace.
+fn refuses(name: &str, deck: &str) -> String {
+    let path = tmp(name);
+    std::fs::write(&path, deck).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_nanofem")).arg(&path).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!err.contains("panicked"), "{} panicked: {}", name, err);
+    assert!(!out.status.success(), "{} was accepted, stdout: {}", name, String::from_utf8_lossy(&out.stdout));
+    err
+}
+
+// Values that are meaningless out of range, and roles put on a group of the
+// wrong dimension. The latter used to run happily and return a plausible
+// answer for a completely different model.
+#[test]
+fn refuses_bad_decks() {
+    let mesh = tem_mesh("valid.msh", "p2");
+    let m = format!("mesh {}\n", mesh.display());
+    let cases: [(&str, &str, &str); 8] = [
+        ("z0neg", "pec pec\nport 1 p1 0 0 1 -50\nsweep lin 1e9 1e9 1\n", "impedance must be positive"),
+        ("z0zero", "pec pec\nport 1 p1 0 0 1 0\nsweep lin 1e9 1e9 1\n", "impedance must be positive"),
+        ("mur0", "mat air eps 1 mur 0\npec pec\nport 1 p1 0 0 1 50\nsweep lin 1e9 1e9 1\n", "mur must be positive"),
+        ("epsneg", "mat air eps -2\npec pec\nport 1 p1 0 0 1 50\nsweep lin 1e9 1e9 1\n", "eps must be positive"),
+        ("tandneg", "mat air eps 1 tand -0.1\npec pec\nport 1 p1 0 0 1 50\nsweep lin 1e9 1e9 1\n", "tand must not be negative"),
+        ("freq0", "pec pec\nport 1 p1 0 0 1 50\nsweep lin 0 0 1\n", "frequency must be positive"),
+        ("pecvol", "pec air\nport 1 p1 0 0 1 50\nsweep lin 1e9 1e9 1\n", "no boundary triangles"),
+        ("matsurf", "mat pec eps 2\npec pec\nport 1 p1 0 0 1 50\nsweep lin 1e9 1e9 1\n", "no tetrahedra"),
+    ];
+    for (name, body, want) in cases {
+        let err = refuses(&format!("{}.nfm", name), &format!("{}{}", m, body));
+        assert!(err.contains(want), "{}: expected '{}', got '{}'", name, want, err.trim());
+    }
+}
+
+// Truncated mesh lines must be reported, not indexed past the end.
+#[test]
+fn refuses_bad_meshes() {
+    let head = "$MeshFormat\n2.2 0 8\n$EndMeshFormat\n";
+    let cases: [(&str, &str, &str); 4] = [
+        ("shortnode", "$Nodes\n1\n1 0 0\n$EndNodes\n", "bad node line"),
+        ("shortelem", "$Nodes\n1\n1 0 0 0\n$EndNodes\n$Elements\n1\n1 4\n$EndElements\n", "bad element line"),
+        ("fewnodes", "$Nodes\n1\n1 0 0 0\n$EndNodes\n$Elements\n1\n1 4 2 1 1 1 2\n$EndElements\n", "fewer nodes"),
+        ("shortphys", "$PhysicalNames\n1\n3\n$EndPhysicalNames\n", "$PhysicalNames entry"),
+    ];
+    for (name, body, want) in cases {
+        let mp = tmp(&format!("{}.msh", name));
+        std::fs::write(&mp, format!("{}{}", head, body)).unwrap();
+        let deck = format!("mesh {}\npec pec\nport 1 p1 0 0 1 50\nsweep lin 1e9 1e9 1\n", mp.display());
+        let err = refuses(&format!("{}.nfm", name), &deck);
+        assert!(err.contains(want), "{}: expected '{}', got '{}'", name, want, err.trim());
+    }
+}
+
 // The budget covers the solver in src/main.rs alone. This test file and the
 // models in models/ are outside it.
 #[test]

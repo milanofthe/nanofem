@@ -149,6 +149,9 @@ fn parse_msh(path: &str) -> Mesh {
             "$PhysicalNames" => {
                 for _ in 0..cnt(&mut it) {
                     let t: Vec<&str> = nx(&mut it).split_whitespace().collect();
+                    if t.len() < 3 {
+                        die("bad $PhysicalNames entry, want: dimension id name");
+                    }
                     let (dim, id): (i64, i64) = (t[0].parse().unwrap_or(-1), t[1].parse().unwrap_or(-1));
                     phys.insert((dim, id), t[2..].join(" ").trim_matches('"').to_string());
                 }
@@ -156,6 +159,9 @@ fn parse_msh(path: &str) -> Mesh {
             "$Nodes" => {
                 for _ in 0..cnt(&mut it) {
                     let t: Vec<f64> = nx(&mut it).split_whitespace().map(|s| s.parse().unwrap_or(f64::NAN)).collect();
+                    if t.len() < 4 {
+                        die("bad node line, want: id x y z");
+                    }
                     idmap.insert(t[0] as i64, m.nodes.len());
                     m.nodes.push([t[1], t[2], t[3]]);
                 }
@@ -163,12 +169,18 @@ fn parse_msh(path: &str) -> Mesh {
             "$Elements" => {
                 for _ in 0..cnt(&mut it) {
                     let t: Vec<i64> = nx(&mut it).split_whitespace().map(|s| s.parse().unwrap_or(-1)).collect();
+                    if t.len() < 3 {
+                        die("bad element line, want: id type ntags ...");
+                    }
                     let (typ, ntag) = (t[1], t[2] as usize);
                     let dim = match typ {
                         2 => 2,
                         4 => 3,
                         _ => continue,
                     };
+                    if t.len() < 4 + ntag + dim as usize {
+                        die("element line has fewer nodes than its type needs");
+                    }
                     let pid = if ntag >= 1 { t[3] } else { 0 };
                     let name = phys.get(&(dim, pid)).cloned().unwrap_or_else(|| pid.to_string());
                     let gi = *groups.entry(name.clone()).or_insert_with(|| {
@@ -240,6 +252,23 @@ fn num(s: &str) -> f64 {
     s.parse().unwrap_or_else(|_| die(&format!("bad number '{}'", s)))
 }
 
+// deck values that are meaningless outside their range
+fn pos(s: &str, what: &str) -> f64 {
+    let v = num(s);
+    if !(v > 0.0) {
+        die(&format!("{} must be positive, got {}", what, s));
+    }
+    v
+}
+
+fn nonneg(s: &str, what: &str) -> f64 {
+    let v = num(s);
+    if !(v >= 0.0) {
+        die(&format!("{} must not be negative, got {}", what, s));
+    }
+    v
+}
+
 fn parse_deck(path: &str) -> Deck {
     let txt = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("cannot read {}: {}", path, e)));
     let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0, field: None };
@@ -260,9 +289,9 @@ fn parse_deck(path: &str) -> Deck {
                 let mut mt = Mat { eps: 1.0, tand: 0.0, mur: 1.0 };
                 for kv in t[2..].chunks(2) {
                     match kv[0].to_lowercase().as_str() {
-                        "eps" => mt.eps = num(kv[1]),
-                        "tand" => mt.tand = num(kv[1]),
-                        "mur" => mt.mur = num(kv[1]),
+                        "eps" => mt.eps = pos(kv[1], "eps"),
+                        "tand" => mt.tand = nonneg(kv[1], "tand"),
+                        "mur" => mt.mur = pos(kv[1], "mur"),
                         _ => bad(),
                     }
                 }
@@ -280,11 +309,12 @@ fn parse_deck(path: &str) -> Deck {
                 if n == 0.0 {
                     die("port direction must be nonzero");
                 }
-                d.ports.push(PortDef { group: t[2].to_string(), dir: sc3(dir, 1.0 / n), z0: num(t[6]) });
+                let z0 = pos(t[6], "port reference impedance");
+                d.ports.push(PortDef { group: t[2].to_string(), dir: sc3(dir, 1.0 / n), z0 });
             }
             "sweep" if t.len() == 5 && t[1] == "lin" => {
-                d.f0 = num(t[2]);
-                d.f1 = num(t[3]);
+                d.f0 = pos(t[2], "sweep start frequency");
+                d.f1 = pos(t[3], "sweep stop frequency");
                 d.nf = num(t[4]) as usize;
             }
             _ => bad(),
@@ -498,6 +528,27 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     let mut pmap: HashMap<usize, usize> = HashMap::new();
     for (p, pd) in deck.ports.iter().enumerate() {
         pmap.insert(gidx(&pd.group), p);
+    }
+    // A surface role named on a volume group, or a material named on a
+    // surface group, would silently do nothing and leave a plausible
+    // looking answer for the wrong model, so both are refused here.
+    let (mut ntri, mut ntet) = (vec![0usize; ng], vec![0usize; ng]);
+    for (_, g) in &mesh.tris {
+        ntri[*g] += 1;
+    }
+    for (_, g) in &mesh.tets {
+        ntet[*g] += 1;
+    }
+    let need = |n: &str, c: &[usize], what: &str| {
+        if c[gidx(n)] == 0 {
+            die(&format!("group '{}' carries no {}", n, what));
+        }
+    };
+    for n in deck.pec.iter().chain(&deck.abc).chain(deck.ports.iter().map(|p| &p.group)) {
+        need(n, &ntri, "boundary triangles");
+    }
+    for n in deck.mats.iter().map(|(n, _)| n).chain(deck.pmls.iter().map(|(n, _)| n)) {
+        need(n, &ntet, "tetrahedra");
     }
     // materials per volume group. A pml region stretches coordinate k by
     // s_k = 1 - j a_k; eps and mu both get the diagonal tensor

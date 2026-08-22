@@ -403,64 +403,54 @@ fn symbolic(n: usize, ap: &[usize], ai: &[u32]) -> Sym {
     Sym { parent, lp }
 }
 
-struct Work {
+struct Fac {
     li: Vec<u32>,
     lx: Vec<Cx>,
     d: Vec<Cx>,
-    y: Vec<Cx>,
-    flag: Vec<usize>,
-    pat: Vec<usize>,
-    lnz: Vec<usize>,
 }
 
-fn work(n: usize, sym: &Sym) -> Work {
-    Work {
-        li: vec![0; sym.lp[n]],
-        lx: vec![cx(0.0, 0.0); sym.lp[n]],
-        d: vec![cx(0.0, 0.0); n],
-        y: vec![cx(0.0, 0.0); n],
-        flag: vec![usize::MAX; n],
-        pat: vec![0; n],
-        lnz: vec![0; n],
-    }
+fn fac(n: usize, sym: &Sym) -> Fac {
+    Fac { li: vec![0; sym.lp[n]], lx: vec![cx(0.0, 0.0); sym.lp[n]], d: vec![cx(0.0, 0.0); n] }
 }
 
-fn numeric(n: usize, ap: &[usize], ai: &[u32], ax: &[Cx], sym: &Sym, w: &mut Work) {
+fn numeric(n: usize, ap: &[usize], ai: &[u32], ax: &[Cx], sym: &Sym, w: &mut Fac) {
+    let (mut y, mut flag) = (vec![cx(0.0, 0.0); n], vec![usize::MAX; n]);
+    let (mut pat, mut lnz) = (vec![0usize; n], vec![0usize; n]);
     for k in 0..n {
         let mut top = n;
-        w.flag[k] = k;
-        w.lnz[k] = 0;
+        flag[k] = k;
+        lnz[k] = 0;
         for p in ap[k]..ap[k + 1] {
             let mut i = ai[p] as usize;
-            w.y[i] = w.y[i] + ax[p];
+            y[i] = y[i] + ax[p];
             let mut len = 0;
-            while i < k && w.flag[i] != k {
-                w.pat[len] = i;
+            while i < k && flag[i] != k {
+                pat[len] = i;
                 len += 1;
-                w.flag[i] = k;
+                flag[i] = k;
                 i = sym.parent[i];
             }
             while len > 0 {
                 len -= 1;
                 top -= 1;
-                w.pat[top] = w.pat[len];
+                pat[top] = pat[len];
             }
         }
-        w.d[k] = w.y[k];
-        w.y[k] = cx(0.0, 0.0);
+        w.d[k] = y[k];
+        y[k] = cx(0.0, 0.0);
         for t in top..n {
-            let i = w.pat[t];
-            let yi = w.y[i];
-            w.y[i] = cx(0.0, 0.0);
-            for p in sym.lp[i]..sym.lp[i] + w.lnz[i] {
-                w.y[w.li[p] as usize] = w.y[w.li[p] as usize] - w.lx[p] * yi;
+            let i = pat[t];
+            let yi = y[i];
+            y[i] = cx(0.0, 0.0);
+            for p in sym.lp[i]..sym.lp[i] + lnz[i] {
+                y[w.li[p] as usize] = y[w.li[p] as usize] - w.lx[p] * yi;
             }
             let lki = yi / w.d[i];
             w.d[k] = w.d[k] - lki * yi;
-            let p = sym.lp[i] + w.lnz[i];
+            let p = sym.lp[i] + lnz[i];
             w.li[p] = k as u32;
             w.lx[p] = lki;
-            w.lnz[i] += 1;
+            lnz[i] += 1;
         }
         if w.d[k].mag() < 1e-300 {
             die("singular system matrix");
@@ -468,7 +458,7 @@ fn numeric(n: usize, ap: &[usize], ai: &[u32], ax: &[Cx], sym: &Sym, w: &mut Wor
     }
 }
 
-fn ldsolve(n: usize, sym: &Sym, w: &Work, b: &mut [Cx]) {
+fn ldsolve(n: usize, sym: &Sym, w: &Fac, b: &mut [Cx]) {
     for j in 0..n {
         let xj = b[j];
         for p in sym.lp[j]..sym.lp[j + 1] {
@@ -762,7 +752,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
             let (ports, ents, ap, ai, sym, perm, freqs, lines) = (&ports, &ents, &ap, &ai, &sym, &perm, &freqs, &lines);
             sc.spawn(move || {
                 let mut ax = vec![cx(0.0, 0.0); ents.len()];
-                let mut w = work(ndof, sym);
+                let mut w = fac(ndof, sym);
                 for fi in (t..freqs.len()).step_by(nt) {
                     let k0 = 2.0 * std::f64::consts::PI * freqs[fi] / C0;
                     for &(pos, c) in ents.iter() {
@@ -825,7 +815,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         for &(pos, c) in &ents {
             ax[pos] = c[0] + (c[1] + c[2].rs(k0)).rs(k0);
         }
-        let mut w = work(ndof, &sym);
+        let mut w = fac(ndof, &sym);
         numeric(ndof, &ap, &ai, &ax, &sym, &mut w);
         let mut rhs = vec![cx(0.0, 0.0); ndof];
         for (&d, &c) in &ports[0].exc {
@@ -862,18 +852,20 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         }
         o += &format!("CELL_TYPES {}\n", mesh.tets.len());
         o += &"10\n".repeat(mesh.tets.len());
-        o += &format!("CELL_DATA {}\nVECTORS Ere double\n", mesh.tets.len());
-        for e in &ef {
-            o += &format!("{:.6e} {:.6e} {:.6e}\n", e[0].re, e[1].re, e[2].re);
-        }
-        o += "VECTORS Eim double\n";
-        for e in &ef {
-            o += &format!("{:.6e} {:.6e} {:.6e}\n", e[0].im, e[1].im, e[2].im);
-        }
-        o += "SCALARS Emag double\nLOOKUP_TABLE default\n";
-        for e in &ef {
-            let m = (e[0].mag().powi(2) + e[1].mag().powi(2) + e[2].mag().powi(2)).sqrt();
-            o += &format!("{:.6e}\n", m);
+        o += &format!("CELL_DATA {}\n", mesh.tets.len());
+        for (head, comp) in [
+            ("VECTORS Ere double", 0),
+            ("VECTORS Eim double", 1),
+            ("SCALARS Emag double\nLOOKUP_TABLE default", 2),
+        ] {
+            o += &format!("{}\n", head);
+            for e in &ef {
+                match comp {
+                    0 => o += &format!("{:.6e} {:.6e} {:.6e}\n", e[0].re, e[1].re, e[2].re),
+                    1 => o += &format!("{:.6e} {:.6e} {:.6e}\n", e[0].im, e[1].im, e[2].im),
+                    _ => o += &format!("{:.6e}\n", (e[0].mag().powi(2) + e[1].mag().powi(2) + e[2].mag().powi(2)).sqrt()),
+                }
+            }
         }
         std::fs::write(path, o).unwrap_or_else(|e| die(&format!("cannot write {}: {}", path, e)));
         eprintln!("nanofem: field written to {}", path);

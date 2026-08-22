@@ -500,6 +500,31 @@ fn numeric(n: usize, ap: &[usize], ai: &[u32], ax: &[Cx], sym: &Sym, w: &mut Fac
     hi / lo
 }
 
+// y = A x for the complex symmetric matrix held as an upper triangle in
+// CSC, the mirror entries contributing to the lower half.
+fn spmv(n: usize, ap: &[usize], ai: &[u32], ax: &[Cx], x: &[Cx], y: &mut [Cx]) {
+    y.iter_mut().for_each(|v| *v = cx(0.0, 0.0));
+    for j in 0..n {
+        for p in ap[j]..ap[j + 1] {
+            let i = ai[p] as usize;
+            y[i] = y[i] + ax[p] * x[j];
+            if i != j {
+                y[j] = y[j] + ax[p] * x[i];
+            }
+        }
+    }
+}
+
+// Solves the equilibrated system for an unscaled right hand side.
+fn solve_scaled(n: usize, sym: &Sym, w: &Fac, sc: &[f64], b: &[Cx]) -> Vec<Cx> {
+    let mut x: Vec<Cx> = (0..n).map(|i| b[i].rs(sc[i])).collect();
+    ldsolve(n, sym, w, &mut x);
+    for i in 0..n {
+        x[i] = x[i].rs(sc[i]);
+    }
+    x
+}
+
 fn ldsolve(n: usize, sym: &Sym, w: &Fac, b: &mut [Cx]) {
     for j in 0..n {
         let xj = b[j];
@@ -859,6 +884,15 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
             (pos, c)
         })
         .collect();
+    // position of each diagonal entry, for the symmetric equilibration
+    let mut dpos = vec![usize::MAX; ndof];
+    for j in 0..ndof {
+        for p in ap[j]..ap[j + 1] {
+            if ai[p] as usize == j {
+                dpos[j] = p;
+            }
+        }
+    }
     let sym = symbolic(ndof, &ap, &ai);
     eprintln!(
         "nanofem: {} nodes, {} tets, {} edges, {} dofs, {:.2}M nnz A, {:.2}M nnz L",
@@ -904,31 +938,59 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         .min(deck.nf)
         .min((4_000_000_000 / bytes).max(1));
     let lines = std::sync::Mutex::new(vec![String::new(); deck.nf]);
-    let worst = std::sync::Mutex::new(0.0f64);
+    let worst = std::sync::Mutex::new((0.0f64, 0.0f64));
     std::thread::scope(|sc| {
         for t in 0..nt {
             let (ports, ents, ap, ai, sym, perm, freqs, lines) = (&ports, &ents, &ap, &ai, &sym, &perm, &freqs, &lines);
-            let worst = &worst;
+            let (worst, dpos) = (&worst, &dpos);
             sc.spawn(move || {
                 let mut ax = vec![cx(0.0, 0.0); ents.len()];
+                let mut raw = vec![cx(0.0, 0.0); ents.len()];
                 let mut w = fac(ndof, sym);
+                let (mut sc_, mut res) = (vec![0.0; ndof], vec![cx(0.0, 0.0); ndof]);
                 for fi in (t..freqs.len()).step_by(nt) {
                     let k0 = 2.0 * std::f64::consts::PI * freqs[fi] / C0;
                     for &(pos, c) in ents.iter() {
-                        ax[pos] = c[0] + (c[1] + c[2].rs(k0)).rs(k0) + c[3].rs(k0.sqrt());
+                        raw[pos] = c[0] + (c[1] + c[2].rs(k0)).rs(k0) + c[3].rs(k0.sqrt());
+                    }
+                    // Symmetric equilibration: factor D A D with D the
+                    // inverse square root of the diagonal, which pulls the
+                    // rows to a common scale and costs one pass.
+                    for j in 0..ndof {
+                        let d = raw[dpos[j]].mag();
+                        sc_[j] = if d > 0.0 { 1.0 / d.sqrt() } else { 1.0 };
+                    }
+                    for j in 0..ndof {
+                        for p in ap[j]..ap[j + 1] {
+                            ax[p] = raw[p].rs(sc_[j] * sc_[ai[p] as usize]);
+                        }
                     }
                     let cond = numeric(ndof, ap, ai, &ax, sym, &mut w);
-                    {
-                        let mut m = worst.lock().unwrap();
-                        *m = m.max(cond);
-                    }
+                    let mut rmax = 0.0f64;
                     let mut smat = vec![vec![cx(0.0, 0.0); np]; np];
                     for p in 0..np {
                         let mut rhs = vec![cx(0.0, 0.0); ndof];
                         for (&d, &c) in &ports[p].exc {
                             rhs[perm[d]] = cx(0.0, -k0 * ETA0 * c / ports[p].w);
                         }
-                        ldsolve(ndof, sym, &w, &mut rhs);
+                        // one step of iterative refinement on the unscaled
+                        // system, which both repairs the accuracy a weak
+                        // pivot cost and yields a measured residual
+                        let b = rhs.clone();
+                        let mut x = solve_scaled(ndof, sym, &w, &sc_, &rhs);
+                        spmv(ndof, ap, ai, &raw, &x, &mut res);
+                        for i in 0..ndof {
+                            res[i] = b[i] - res[i];
+                        }
+                        let dx = solve_scaled(ndof, sym, &w, &sc_, &res);
+                        for i in 0..ndof {
+                            x[i] = x[i] + dx[i];
+                        }
+                        spmv(ndof, ap, ai, &raw, &x, &mut res);
+                        let n2 = |v: &[Cx]| v.iter().map(|c| c.mag() * c.mag()).sum::<f64>().sqrt();
+                        let r = n2(&(0..ndof).map(|i| b[i] - res[i]).collect::<Vec<Cx>>()) / n2(&b);
+                        rmax = rmax.max(r);
+                        rhs = x;
                         for q in 0..np {
                             let mut vq = cx(0.0, 0.0);
                             for (&d, &c) in &ports[q].exc {
@@ -996,6 +1058,10 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                             }
                         }
                     }
+                    {
+                        let mut m = worst.lock().unwrap();
+                        *m = (m.0.max(cond), m.1.max(rmax));
+                    }
                     lines.lock().unwrap()[fi] = out;
                 }
             });
@@ -1004,11 +1070,12 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     for l in lines.into_inner().unwrap() {
         outln(format_args!("{}", l));
     }
-    let cond = worst.into_inner().unwrap();
+    let (cond, resid) = worst.into_inner().unwrap();
     eprintln!(
-        "nanofem: worst pivot spread {:.1e}{}",
+        "nanofem: worst pivot spread {:.1e}, worst relative residual {:.1e}{}",
         cond,
-        if cond > 1e12 { ", the system is ill conditioned; check the frequency range and the mesh" } else { "" }
+        resid,
+        if cond > 1e12 || resid > 1e-8 { ", treat this run with suspicion" } else { "" }
     );
     // field snapshot: solve once more at the requested frequency with port 1
     // driven and write the E field per tet (centroid value, where the

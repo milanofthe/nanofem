@@ -434,7 +434,12 @@ fn fac(n: usize, sym: &Sym) -> Fac {
     Fac { li: vec![0; sym.lp[n]], lx: vec![cx(0.0, 0.0); sym.lp[n]], d: vec![cx(0.0, 0.0); n] }
 }
 
-fn numeric(n: usize, ap: &[usize], ai: &[u32], ax: &[Cx], sym: &Sym, w: &mut Fac) {
+// Factors the matrix and returns the spread of the pivots, max|D| / min|D|.
+// That ratio is a free lower bound on the condition number: it blows up as
+// 1/f^2 towards low frequency, where the curl curl operator loses the mass
+// term that regularizes its nullspace, and it rises again once the mesh
+// gets coarse against the wavelength.
+fn numeric(n: usize, ap: &[usize], ai: &[u32], ax: &[Cx], sym: &Sym, w: &mut Fac) -> f64 {
     let (mut y, mut flag) = (vec![cx(0.0, 0.0); n], vec![usize::MAX; n]);
     let (mut pat, mut lnz) = (vec![0usize; n], vec![0usize; n]);
     for k in 0..n {
@@ -477,6 +482,12 @@ fn numeric(n: usize, ap: &[usize], ai: &[u32], ax: &[Cx], sym: &Sym, w: &mut Fac
             die("singular system matrix");
         }
     }
+    let (mut lo, mut hi) = (f64::MAX, 0.0f64);
+    for d in &w.d {
+        lo = lo.min(d.mag());
+        hi = hi.max(d.mag());
+    }
+    hi / lo
 }
 
 fn ldsolve(n: usize, sym: &Sym, w: &Fac, b: &mut [Cx]) {
@@ -549,6 +560,23 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     }
     for n in deck.mats.iter().map(|(n, _)| n).chain(deck.pmls.iter().map(|(n, _)| n)) {
         need(n, &ntet, "tetrahedra");
+    }
+    // Echo how each mesh group was understood. A group the deck never names
+    // is legal but silently becomes vacuum or a natural PMC wall, which is
+    // the one mistake validation cannot catch, so it is listed too.
+    for g in 0..ng {
+        let named = deck.mats.iter().any(|(n, _)| *n == mesh.names[g]);
+        let pml = deck.pmls.iter().any(|(n, _)| *n == mesh.names[g]);
+        let what = match (role[g], pmap.get(&g), ntet[g] > 0, named, pml) {
+            (1, ..) => "pec",
+            (2, ..) => "abc",
+            (_, Some(_), ..) => "port",
+            (_, _, true, _, true) => "pml",
+            (_, _, true, true, _) => "material",
+            (_, _, true, ..) => "vacuum (not named in the deck)",
+            _ => "natural pmc (not named in the deck)",
+        };
+        eprintln!("nanofem: group '{}' -> {}", mesh.names[g], what);
     }
     // materials per volume group. A pml region stretches coordinate k by
     // s_k = 1 - j a_k; eps and mu both get the diagonal tensor
@@ -789,9 +817,11 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         .min(deck.nf)
         .min((4_000_000_000 / bytes).max(1));
     let lines = std::sync::Mutex::new(vec![String::new(); deck.nf]);
+    let worst = std::sync::Mutex::new(0.0f64);
     std::thread::scope(|sc| {
         for t in 0..nt {
             let (ports, ents, ap, ai, sym, perm, freqs, lines) = (&ports, &ents, &ap, &ai, &sym, &perm, &freqs, &lines);
+            let worst = &worst;
             sc.spawn(move || {
                 let mut ax = vec![cx(0.0, 0.0); ents.len()];
                 let mut w = fac(ndof, sym);
@@ -800,7 +830,11 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                     for &(pos, c) in ents.iter() {
                         ax[pos] = c[0] + (c[1] + c[2].rs(k0)).rs(k0);
                     }
-                    numeric(ndof, ap, ai, &ax, sym, &mut w);
+                    let cond = numeric(ndof, ap, ai, &ax, sym, &mut w);
+                    {
+                        let mut m = worst.lock().unwrap();
+                        *m = m.max(cond);
+                    }
                     let mut smat = vec![vec![cx(0.0, 0.0); np]; np];
                     for p in 0..np {
                         let mut rhs = vec![cx(0.0, 0.0); ndof];
@@ -848,6 +882,12 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     for l in lines.into_inner().unwrap() {
         outln(format_args!("{}", l));
     }
+    let cond = worst.into_inner().unwrap();
+    eprintln!(
+        "nanofem: worst pivot spread {:.1e}{}",
+        cond,
+        if cond > 1e12 { ", the system is ill conditioned; check the frequency range and the mesh" } else { "" }
+    );
     // field snapshot: solve once more at the requested frequency with port 1
     // driven and write the E field per tet (centroid value, where the
     // whitney functions reduce to (g_b - g_a) / 4) as legacy VTK cell data
@@ -858,7 +898,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
             ax[pos] = c[0] + (c[1] + c[2].rs(k0)).rs(k0);
         }
         let mut w = fac(ndof, &sym);
-        numeric(ndof, &ap, &ai, &ax, &sym, &mut w);
+        let _ = numeric(ndof, &ap, &ai, &ax, &sym, &mut w);
         let mut rhs = vec![cx(0.0, 0.0); ndof];
         for (&d, &c) in &ports[0].exc {
             rhs[perm[d]] = cx(0.0, -k0 * ETA0 * c / ports[0].w);

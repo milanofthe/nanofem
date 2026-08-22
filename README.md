@@ -50,7 +50,10 @@ builds the geometry and mesh with Gmsh, patch.nfm is the matching deck.
     target/release/nanofem models/patch.nfm
 
 The sweep shows the resonance as an S11 dip at 2.40 GHz on the default
-mesh, about 2 percent below the mesh converged 2.45 GHz.
+mesh. That number is not converged: refining the mesh moves it to 2.48 GHz,
+and part of the remaining drift is the first order absorbing boundary,
+which sits only about a third of a wavelength above the patch. The model is
+meant to exercise the solver, not to be a converged antenna design.
 
 ## Mesh
 

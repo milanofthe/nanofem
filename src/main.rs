@@ -700,57 +700,79 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         sym.lp[ndof] as f64 / 1e6
     );
     // frequency sweep: factor once per frequency, one solve per port, port
-    // voltage V = -(h/A) integral E . dir, S(q,p) = 2 Vq / sqrt(z0p z0q) - d(q,p)
+    // voltage V = -(h/A) integral E . dir, S(q,p) = 2 Vq / sqrt(z0p z0q) - d(q,p).
+    // Frequencies run in parallel, thread count capped by memory (4 GB for
+    // the factorizations), lines are printed in order afterwards.
     let np = ports.len();
     outln(format_args!("# Hz S RI R {}", ports[0].z0));
-    let mut ax = vec![cx(0.0, 0.0); ents.len()];
-    let mut w = work(ndof, &sym);
-    for fi in 0..deck.nf {
-        let f = if deck.nf == 1 { deck.f0 } else { deck.f0 + (deck.f1 - deck.f0) * fi as f64 / (deck.nf - 1) as f64 };
-        let k0 = 2.0 * std::f64::consts::PI * f / C0;
-        for &(pos, s, m, b) in &ents {
-            ax[pos] = cx(s, 0.0) + m.rs(-k0 * k0) + b.js(k0);
+    let freqs: Vec<f64> = (0..deck.nf)
+        .map(|fi| if deck.nf == 1 { deck.f0 } else { deck.f0 + (deck.f1 - deck.f0) * fi as f64 / (deck.nf - 1) as f64 })
+        .collect();
+    let bytes = 24 * sym.lp[ndof] + 16 * ents.len() + 64 * ndof;
+    let nt = std::thread::available_parallelism()
+        .map(|x| x.get())
+        .unwrap_or(1)
+        .min(deck.nf)
+        .min((4_000_000_000 / bytes).max(1));
+    let lines = std::sync::Mutex::new(vec![String::new(); deck.nf]);
+    std::thread::scope(|sc| {
+        for t in 0..nt {
+            let (ports, ents, ap, ai, sym, perm, freqs, lines) = (&ports, &ents, &ap, &ai, &sym, &perm, &freqs, &lines);
+            sc.spawn(move || {
+                let mut ax = vec![cx(0.0, 0.0); ents.len()];
+                let mut w = work(ndof, sym);
+                for fi in (t..freqs.len()).step_by(nt) {
+                    let k0 = 2.0 * std::f64::consts::PI * freqs[fi] / C0;
+                    for &(pos, s, m, b) in ents.iter() {
+                        ax[pos] = cx(s, 0.0) + m.rs(-k0 * k0) + b.js(k0);
+                    }
+                    numeric(ndof, ap, ai, &ax, sym, &mut w);
+                    let mut smat = vec![vec![cx(0.0, 0.0); np]; np];
+                    for p in 0..np {
+                        let mut rhs = vec![cx(0.0, 0.0); ndof];
+                        for (&d, &c) in &ports[p].exc {
+                            rhs[perm[d]] = cx(0.0, -k0 * ETA0 * c / ports[p].w);
+                        }
+                        ldsolve(ndof, sym, &w, &mut rhs);
+                        for q in 0..np {
+                            let mut vq = cx(0.0, 0.0);
+                            for (&d, &c) in &ports[q].exc {
+                                vq = vq + rhs[perm[d]].rs(c);
+                            }
+                            vq = vq.rs(-ports[q].h / ports[q].area);
+                            smat[q][p] = vq.rs(2.0 / (ports[p].z0 * ports[q].z0).sqrt());
+                            if q == p {
+                                smat[q][p] = smat[q][p] - cx(1.0, 0.0);
+                            }
+                        }
+                    }
+                    // touchstone: 2-port data is S11 S21 S12 S22 on one
+                    // line, larger matrices row by row
+                    let pair = |s: Cx| format!(" {:.9e} {:.9e}", s.re, s.im);
+                    let mut out = format!("{:.9e}", freqs[fi]);
+                    if np <= 2 {
+                        for p in 0..np {
+                            for q in 0..np {
+                                out += &pair(smat[q][p]);
+                            }
+                        }
+                    } else {
+                        for q in 0..np {
+                            for p in 0..np {
+                                out += &pair(smat[q][p]);
+                            }
+                            if q + 1 < np {
+                                out += "\n";
+                            }
+                        }
+                    }
+                    lines.lock().unwrap()[fi] = out;
+                }
+            });
         }
-        numeric(ndof, &ap, &ai, &ax, &sym, &mut w);
-        let mut smat = vec![vec![cx(0.0, 0.0); np]; np];
-        for p in 0..np {
-            let mut rhs = vec![cx(0.0, 0.0); ndof];
-            for (&d, &c) in &ports[p].exc {
-                rhs[perm[d]] = cx(0.0, -k0 * ETA0 * c / ports[p].w);
-            }
-            ldsolve(ndof, &sym, &w, &mut rhs);
-            for q in 0..np {
-                let mut vq = cx(0.0, 0.0);
-                for (&d, &c) in &ports[q].exc {
-                    vq = vq + rhs[perm[d]].rs(c);
-                }
-                vq = vq.rs(-ports[q].h / ports[q].area);
-                smat[q][p] = vq.rs(2.0 / (ports[p].z0 * ports[q].z0).sqrt());
-                if q == p {
-                    smat[q][p] = smat[q][p] - cx(1.0, 0.0);
-                }
-            }
-        }
-        // touchstone: 2-port data is S11 S21 S12 S22 on one line, larger
-        // matrices row by row with the frequency on the first line
-        let pair = |s: Cx| format!(" {:.9e} {:.9e}", s.re, s.im);
-        if np <= 2 {
-            let mut l = format!("{:.9e}", f);
-            for p in 0..np {
-                for q in 0..np {
-                    l += &pair(smat[q][p]);
-                }
-            }
-            outln(format_args!("{}", l));
-        } else {
-            for q in 0..np {
-                let mut l = if q == 0 { format!("{:.9e}", f) } else { String::new() };
-                for p in 0..np {
-                    l += &pair(smat[q][p]);
-                }
-                outln(format_args!("{}", l.trim_start()));
-            }
-        }
+    });
+    for l in lines.into_inner().unwrap() {
+        outln(format_args!("{}", l));
     }
 }
 

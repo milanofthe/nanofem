@@ -81,12 +81,16 @@ the impedance of a good conductor, whose surface resistance grows with the
 square root of frequency; every matrix entry therefore keeps four
 frequency independent coefficients, against 1, k0, k0 squared and the
 square root of k0, so the whole assembly still happens once for an entire
-sweep. Direct solution with a complex symmetric
-sparse LDL^T after a geometric nested dissection ordering, frequencies run
-in parallel across threads. A PML region is declared in the deck by naming
-a mesh volume and the axes along which it absorbs; put nothing or PEC
-behind it. No modal waveguide ports, no adaptive refinement, first order
-elements only.
+sweep.
+
+A PML region is declared in the deck by naming a mesh volume and the axes
+along which it absorbs; put nothing or PEC behind it. The system is solved
+directly with a complex symmetric sparse LDL^T after a geometric nested
+dissection ordering, and the frequencies of a sweep run in parallel across
+threads.
+
+No modal waveguide ports, no adaptive refinement, first order elements
+only.
 
 ## Diagnostics
 
@@ -112,5 +116,8 @@ results: a matched parallel plate TEM line (S11, S21 magnitude and phase), a
 lossy dielectric filled line against the analytic attenuation and phase, a
 shorted line reflecting with unit magnitude and the right phase, a
 deliberately mismatched port against the impedance transformation, an
-absorbing wall terminating a TEM wave, and a PEC box cavity resonating at
-the analytic mode frequency.
+absorbing wall terminating a TEM wave, a PML slab doing the same, a PEC box
+cavity resonating at the analytic mode frequency, a conductive filling
+attenuating by the analytic propagation constant, lossy plates attenuating
+by the analytic surface resistance, and a shorted line whose impedance,
+admittance and inductance match the closed form for a coil.

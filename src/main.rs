@@ -270,10 +270,11 @@ fn parse_deck(path: &str) -> Deck {
 
 // ---------------------------------------------------------------- ordering
 
-// Reverse Cuthill-McKee on the dof graph: BFS from a minimum degree seed,
-// neighbors visited in order of increasing degree, order reversed. Returns
-// perm with perm[old] = new.
-fn rcm(n: usize, keys: &[(u32, u32)]) -> Vec<usize> {
+// Fill reducing ordering by geometric nested dissection: split the dof set
+// at the median of the longest bounding box axis, take as separator the
+// second half vertices with a neighbor in the first half, order both halves
+// recursively, the separator last. Returns perm with perm[old] = new.
+fn ndorder(n: usize, keys: &[(u32, u32)], pts: &[V3]) -> Vec<usize> {
     let mut adj: Vec<Vec<u32>> = vec![vec![]; n];
     for &(a, b) in keys {
         if a != b {
@@ -281,83 +282,171 @@ fn rcm(n: usize, keys: &[(u32, u32)]) -> Vec<usize> {
             adj[b as usize].push(a);
         }
     }
-    let mut order = Vec::with_capacity(n);
-    let mut seen = vec![false; n];
-    let mut rest: Vec<usize> = (0..n).collect();
-    rest.sort_by_key(|&v| adj[v].len());
-    for &seed in &rest {
-        if seen[seed] {
-            continue;
+    fn rec(set: &mut Vec<u32>, adj: &[Vec<u32>], pts: &[V3], order: &mut Vec<u32>, mark: &mut [u64], stamp: &mut u64) {
+        if set.len() <= 32 {
+            order.append(set);
+            return;
         }
-        seen[seed] = true;
-        let mut q = std::collections::VecDeque::from([seed]);
-        while let Some(v) = q.pop_front() {
-            order.push(v);
-            let mut nb: Vec<u32> = adj[v].iter().copied().filter(|&w| !seen[w as usize]).collect();
-            nb.sort_by_key(|&w| adj[w as usize].len());
-            for w in nb {
-                if !seen[w as usize] {
-                    seen[w as usize] = true;
-                    q.push_back(w as usize);
-                }
+        let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+        for &v in set.iter() {
+            for k in 0..3 {
+                lo[k] = lo[k].min(pts[v as usize][k]);
+                hi[k] = hi[k].max(pts[v as usize][k]);
             }
         }
+        let mut ax = 0;
+        for k in 1..3 {
+            if hi[k] - lo[k] > hi[ax] - lo[ax] {
+                ax = k;
+            }
+        }
+        set.sort_unstable_by(|&a, &b| pts[a as usize][ax].total_cmp(&pts[b as usize][ax]));
+        let half = set.len() / 2;
+        *stamp += 1;
+        let sa = *stamp;
+        for &v in &set[..half] {
+            mark[v as usize] = sa;
+        }
+        let mut a: Vec<u32> = set[..half].to_vec();
+        let (mut b, mut sep) = (vec![], vec![]);
+        for &v in &set[half..] {
+            if adj[v as usize].iter().any(|&w| mark[w as usize] == sa) {
+                sep.push(v);
+            } else {
+                b.push(v);
+            }
+        }
+        rec(&mut a, adj, pts, order, mark, stamp);
+        rec(&mut b, adj, pts, order, mark, stamp);
+        order.append(&mut sep);
     }
+    let mut order = Vec::with_capacity(n);
+    let (mut mark, mut stamp) = (vec![0u64; n], 0u64);
+    let mut set: Vec<u32> = (0..n as u32).collect();
+    rec(&mut set, &adj, pts, &mut order, &mut mark, &mut stamp);
     let mut perm = vec![0; n];
-    for (new, &old) in order.iter().rev().enumerate() {
-        perm[old] = new;
+    for (new, &old) in order.iter().enumerate() {
+        perm[old as usize] = new;
     }
     perm
 }
 
-// ---------------------------------------------------------------- skyline
+// ---------------------------------------------------------------- sparse ldl
 
-// Complex symmetric profile LDL^T (COLSOL). The upper triangle is stored by
-// columns, column j holds rows frow[j]..=j at data[off[j]..]. After factor,
-// columns hold U (unit upper) off the diagonal and D on the diagonal.
-fn factor(n: usize, frow: &[usize], off: &[usize], a: &mut [Cx]) {
-    for j in 0..n {
-        let fj = frow[j];
-        for i in fj + 1..j {
-            let fi = frow[i];
-            let mut s = cx(0.0, 0.0);
-            for k in fi.max(fj)..i {
-                s = s + a[off[i] + k - fi] * a[off[j] + k - fj];
+// Complex symmetric sparse LDL^T, up looking, no pivoting, after Davis' LDL.
+// The permuted upper triangle sits in CSC (ap, ai), unsorted within columns.
+// Symbolic pass: elimination tree and exact column counts of L. Numeric
+// pass: for column k the reach through the etree gives the pattern of row k
+// of L in topological order, a dense accumulator carries the values.
+struct Sym {
+    parent: Vec<usize>,
+    lp: Vec<usize>,
+}
+
+fn symbolic(n: usize, ap: &[usize], ai: &[u32]) -> Sym {
+    let (mut parent, mut lnz, mut flag) = (vec![usize::MAX; n], vec![0usize; n], vec![usize::MAX; n]);
+    for k in 0..n {
+        flag[k] = k;
+        for p in ap[k]..ap[k + 1] {
+            let mut i = ai[p] as usize;
+            while i < k && flag[i] != k {
+                if parent[i] == usize::MAX {
+                    parent[i] = k;
+                }
+                lnz[i] += 1;
+                flag[i] = k;
+                i = parent[i];
             }
-            a[off[j] + i - fj] = a[off[j] + i - fj] - s;
         }
-        let mut dg = a[off[j] + j - fj];
-        for k in fj..j {
-            let g = a[off[j] + k - fj];
-            let u = g / a[off[k] + k - frow[k]];
-            dg = dg - u * g;
-            a[off[j] + k - fj] = u;
-        }
-        if dg.mag() < 1e-300 {
-            die("singular system matrix");
-        }
-        a[off[j] + j - fj] = dg;
+    }
+    let mut lp = vec![0usize; n + 1];
+    for k in 0..n {
+        lp[k + 1] = lp[k] + lnz[k];
+    }
+    Sym { parent, lp }
+}
+
+struct Work {
+    li: Vec<u32>,
+    lx: Vec<Cx>,
+    d: Vec<Cx>,
+    y: Vec<Cx>,
+    flag: Vec<usize>,
+    pat: Vec<usize>,
+    lnz: Vec<usize>,
+}
+
+fn work(n: usize, sym: &Sym) -> Work {
+    Work {
+        li: vec![0; sym.lp[n]],
+        lx: vec![cx(0.0, 0.0); sym.lp[n]],
+        d: vec![cx(0.0, 0.0); n],
+        y: vec![cx(0.0, 0.0); n],
+        flag: vec![usize::MAX; n],
+        pat: vec![0; n],
+        lnz: vec![0; n],
     }
 }
 
-fn solve(n: usize, frow: &[usize], off: &[usize], a: &[Cx], b: &mut [Cx]) {
-    for j in 0..n {
-        let fj = frow[j];
-        let mut s = cx(0.0, 0.0);
-        for k in fj..j {
-            s = s + a[off[j] + k - fj] * b[k];
+fn numeric(n: usize, ap: &[usize], ai: &[u32], ax: &[Cx], sym: &Sym, w: &mut Work) {
+    for k in 0..n {
+        let mut top = n;
+        w.flag[k] = k;
+        w.lnz[k] = 0;
+        for p in ap[k]..ap[k + 1] {
+            let mut i = ai[p] as usize;
+            w.y[i] = w.y[i] + ax[p];
+            let mut len = 0;
+            while i < k && w.flag[i] != k {
+                w.pat[len] = i;
+                len += 1;
+                w.flag[i] = k;
+                i = sym.parent[i];
+            }
+            while len > 0 {
+                len -= 1;
+                top -= 1;
+                w.pat[top] = w.pat[len];
+            }
         }
-        b[j] = b[j] - s;
+        w.d[k] = w.y[k];
+        w.y[k] = cx(0.0, 0.0);
+        for t in top..n {
+            let i = w.pat[t];
+            let yi = w.y[i];
+            w.y[i] = cx(0.0, 0.0);
+            for p in sym.lp[i]..sym.lp[i] + w.lnz[i] {
+                w.y[w.li[p] as usize] = w.y[w.li[p] as usize] - w.lx[p] * yi;
+            }
+            let lki = yi / w.d[i];
+            w.d[k] = w.d[k] - lki * yi;
+            let p = sym.lp[i] + w.lnz[i];
+            w.li[p] = k as u32;
+            w.lx[p] = lki;
+            w.lnz[i] += 1;
+        }
+        if w.d[k].mag() < 1e-300 {
+            die("singular system matrix");
+        }
+    }
+}
+
+fn ldsolve(n: usize, sym: &Sym, w: &Work, b: &mut [Cx]) {
+    for j in 0..n {
+        let xj = b[j];
+        for p in sym.lp[j]..sym.lp[j + 1] {
+            b[w.li[p] as usize] = b[w.li[p] as usize] - w.lx[p] * xj;
+        }
     }
     for j in 0..n {
-        b[j] = b[j] / a[off[j] + j - frow[j]];
+        b[j] = b[j] / w.d[j];
     }
     for j in (0..n).rev() {
-        let xj = b[j];
-        let fj = frow[j];
-        for k in fj..j {
-            b[k] = b[k] - a[off[j] + k - fj] * xj;
+        let mut s = b[j];
+        for p in sym.lp[j]..sym.lp[j + 1] {
+            s = s - w.lx[p] * b[w.li[p] as usize];
         }
+        b[j] = s;
     }
 }
 
@@ -399,11 +488,14 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     }
     // global edges, oriented low node -> high node
     let mut emap: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut enodes: Vec<(u32, u32)> = vec![];
     for (t, _) in &mesh.tets {
         for (a, b) in TE {
             let k = (t[a].min(t[b]) as u32, t[a].max(t[b]) as u32);
-            let n = emap.len() as u32;
-            emap.entry(k).or_insert(n);
+            if !emap.contains_key(&k) {
+                emap.insert(k, enodes.len() as u32);
+                enodes.push(k);
+            }
         }
     }
     let ne = emap.len();
@@ -567,57 +659,66 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
             }
         }
     }
-    // ordering, skyline profile, entry placement
+    // fill reducing ordering on edge midpoints, then the permuted upper
+    // triangle in CSC with a fixed slot per assembled entry
     let keys: Vec<(u32, u32)> = acc.keys().copied().collect();
-    let perm = rcm(ndof, &keys);
-    let mut frow: Vec<usize> = (0..ndof).collect();
+    let mut pts = vec![[0.0; 3]; ndof];
+    for e in 0..ne {
+        if dof[e] != usize::MAX {
+            let (pa, pb) = (mesh.nodes[enodes[e].0 as usize], mesh.nodes[enodes[e].1 as usize]);
+            pts[dof[e]] = sc3([pa[0] + pb[0], pa[1] + pb[1], pa[2] + pb[2]], 0.5);
+        }
+    }
+    let perm = ndorder(ndof, &keys, &pts);
+    let mut ap = vec![0usize; ndof + 1];
     for &(a, b) in &keys {
-        let (i, j) = (perm[a as usize].min(perm[b as usize]), perm[a as usize].max(perm[b as usize]));
-        frow[j] = frow[j].min(i);
+        ap[perm[a as usize].max(perm[b as usize]) + 1] += 1;
     }
-    let mut off = vec![0usize; ndof];
-    let mut total = 0;
     for j in 0..ndof {
-        off[j] = total;
-        total += j - frow[j] + 1;
+        ap[j + 1] += ap[j];
     }
+    let mut nxt = ap.clone();
+    let mut ai = vec![0u32; keys.len()];
     let ents: Vec<(usize, f64, Cx, Cx)> = acc
         .iter()
         .map(|(&(a, b), &(s, m, bb))| {
             let (i, j) = (perm[a as usize].min(perm[b as usize]), perm[a as usize].max(perm[b as usize]));
-            (off[j] + i - frow[j], s, m, bb)
+            let pos = nxt[j];
+            nxt[j] += 1;
+            ai[pos] = i as u32;
+            (pos, s, m, bb)
         })
         .collect();
+    let sym = symbolic(ndof, &ap, &ai);
     eprintln!(
-        "nanofem: {} nodes, {} tets, {} edges, {} dofs, skyline {:.1} MB",
+        "nanofem: {} nodes, {} tets, {} edges, {} dofs, {:.2}M nnz A, {:.2}M nnz L",
         mesh.nodes.len(),
         mesh.tets.len(),
         ne,
         ndof,
-        total as f64 * 16.0 / 1e6
+        ents.len() as f64 / 1e6,
+        sym.lp[ndof] as f64 / 1e6
     );
     // frequency sweep: factor once per frequency, one solve per port, port
     // voltage V = -(h/A) integral E . dir, S(q,p) = 2 Vq / sqrt(z0p z0q) - d(q,p)
     let np = ports.len();
     outln(format_args!("# Hz S RI R {}", ports[0].z0));
-    let mut a = vec![cx(0.0, 0.0); total];
+    let mut ax = vec![cx(0.0, 0.0); ents.len()];
+    let mut w = work(ndof, &sym);
     for fi in 0..deck.nf {
         let f = if deck.nf == 1 { deck.f0 } else { deck.f0 + (deck.f1 - deck.f0) * fi as f64 / (deck.nf - 1) as f64 };
         let k0 = 2.0 * std::f64::consts::PI * f / C0;
-        for e in a.iter_mut() {
-            *e = cx(0.0, 0.0);
-        }
         for &(pos, s, m, b) in &ents {
-            a[pos] = a[pos] + cx(s, 0.0) + m.rs(-k0 * k0) + b.js(k0);
+            ax[pos] = cx(s, 0.0) + m.rs(-k0 * k0) + b.js(k0);
         }
-        factor(ndof, &frow, &off, &mut a);
+        numeric(ndof, &ap, &ai, &ax, &sym, &mut w);
         let mut smat = vec![vec![cx(0.0, 0.0); np]; np];
         for p in 0..np {
             let mut rhs = vec![cx(0.0, 0.0); ndof];
             for (&d, &c) in &ports[p].exc {
                 rhs[perm[d]] = cx(0.0, -k0 * ETA0 * c / ports[p].w);
             }
-            solve(ndof, &frow, &off, &a, &mut rhs);
+            ldsolve(ndof, &sym, &w, &mut rhs);
             for q in 0..np {
                 let mut vq = cx(0.0, 0.0);
                 for (&d, &c) in &ports[q].exc {

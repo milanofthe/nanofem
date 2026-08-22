@@ -319,6 +319,84 @@ fn cavity_resonance() {
     assert!((best.0 - f101).abs() < 0.08e9, "resonance at {} GHz, expected {} GHz", best.0 / 1e9, f101 / 1e9);
 }
 
+// Accumulated phase error of the TEM line at a given frequency and element
+// order. The exact answer is -k0 L, so this measures dispersion alone.
+fn phase_error(tag: &str, order: usize, f: f64) -> f64 {
+    let mesh = tem_mesh(&format!("{}.msh", tag), "p2");
+    let deck = format!(
+        "mesh {}\npec pec\norder {}\nport 1 p1 0 0 1 {}\nport 2 p2 0 0 1 {}\nsweep lin {} {} 1\n",
+        mesh.display(),
+        order,
+        ETA0,
+        ETA0,
+        f,
+        f
+    );
+    let v = run(&format!("{}.nfm", tag), &deck)[0].1.clone();
+    ang_diff(v[3].atan2(v[2]), -2.0 * std::f64::consts::PI * f / C0 * 0.12)
+}
+
+// Second order elements must converge much faster. At six cells per
+// wavelength the first order phase error is already a fifth of a radian,
+// while second order stays below a milliradian on the same mesh.
+#[test]
+fn order2_beats_order1() {
+    let (e1, e2) = (phase_error("beat1", 1, 5e9).abs(), phase_error("beat2", 2, 5e9).abs());
+    assert!(e1 > 0.1, "first order error {} unexpectedly small", e1);
+    assert!(e2 < 1e-3, "second order error {} too large", e2);
+    assert!(e1 / e2 > 100.0, "second order only {}x better", e1 / e2);
+}
+
+// The accumulated phase error grows as k^(2p+1), so tripling the frequency
+// multiplies it by about 27 for p = 1 and about 243 for p = 2. Hitting both
+// rates is a sharp check on the basis, since a wrong face function
+// orientation would destroy the second order rate.
+#[test]
+fn convergence_rates() {
+    for (order, rate) in [(1, 27.0), (2, 243.0)] {
+        let lo = phase_error(&format!("rate{}lo", order), order, 1e9).abs();
+        let (a, b) = (lo, phase_error(&format!("rate{}hi", order), order, 3e9).abs());
+        let got = b / a;
+        assert!(got > rate * 0.7 && got < rate * 1.4, "order {} grew by {}, expected about {}", order, got, rate);
+    }
+}
+
+// Order 2 must reproduce the analytic attenuation of the lossy line more
+// closely than order 1 does.
+#[test]
+fn order2_dielectric() {
+    let (lx, lyz) = (0.12, 0.01);
+    let mesh = box_msh(
+        "diel2.msh",
+        [12, 1, 1],
+        [lx, lyz, lyz],
+        &move |x, _y, z| {
+            if z < 1e-12 || z > lyz - 1e-12 {
+                Some("pec")
+            } else if x < 1e-12 {
+                Some("p1")
+            } else if x > lx - 1e-12 {
+                Some("p2")
+            } else {
+                None
+            }
+        },
+        &|_, _, _| "diel",
+    );
+    let z0 = ETA0 / 1.5;
+    let deck = format!(
+        "mesh {}\nmat diel eps 2.25 tand 0.02\npec pec\norder 2\nport 1 p1 0 0 1 {}\nport 2 p2 0 0 1 {}\nsweep lin 1e9 1e9 1\n",
+        mesh.display(),
+        z0,
+        z0
+    );
+    let v = run("diel2.nfm", &deck)[0].1.clone();
+    let k0 = 2.0 * std::f64::consts::PI * 1e9 / C0;
+    let expect = (-1.5 * k0 * 0.01 * 0.12).exp();
+    let err = (mag(v[2], v[3]) - expect).abs();
+    assert!(err < 5e-5, "order 2 attenuation off by {}", err);
+}
+
 // The budget covers the solver in src/main.rs alone. This test file and the
 // models in models/ are outside it.
 #[test]

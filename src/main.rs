@@ -83,6 +83,7 @@ impl Cx {
 
 type V3 = [f64; 3];
 
+fn add3(a: V3, b: V3) -> V3 { [a[0] + b[0], a[1] + b[1], a[2] + b[2]] }
 fn sub3(a: V3, b: V3) -> V3 { [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }
 fn dot3(a: V3, b: V3) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
 fn cross3(a: V3, b: V3) -> V3 {
@@ -220,10 +221,17 @@ fn parse_msh(path: &str) -> Mesh {
                         .iter()
                         .map(|id| *idmap.get(id).unwrap_or_else(|| die("element references unknown node")))
                         .collect();
+                    // vertices ascending: local edges and faces then follow
+                    // the global numbering, which fixes the orientation of
+                    // every basis function without a sign convention
                     if dim == 2 {
-                        m.tris.push(([nd[0], nd[1], nd[2]], gi));
+                        let mut k = [nd[0], nd[1], nd[2]];
+                        k.sort();
+                        m.tris.push((k, gi));
                     } else {
-                        m.tets.push(([nd[0], nd[1], nd[2], nd[3]], gi));
+                        let mut k = [nd[0], nd[1], nd[2], nd[3]];
+                        k.sort();
+                        m.tets.push((k, gi));
                     }
                 }
             }
@@ -247,6 +255,7 @@ fn parse_msh(path: &str) -> Mesh {
 //   port <n> <group> <jx> <jy> <jz> <z0> (n counting from 1, j = voltage direction)
 //   sweep lin <f0> <f1> <npoints>
 //   field <path.vtk> <f>                 (E field snapshot, port 1 driven)
+//   order <1|2>                          (element order, default 1)
 struct Mat {
     eps: f64,
     tand: f64,
@@ -270,6 +279,7 @@ struct Deck {
     f1: f64,
     nf: usize,
     field: Option<(String, f64)>,
+    order: usize,
 }
 
 fn num(s: &str) -> f64 {
@@ -278,7 +288,7 @@ fn num(s: &str) -> f64 {
 
 fn parse_deck(path: &str) -> Deck {
     let txt = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("cannot read {}: {}", path, e)));
-    let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0, field: None };
+    let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0, field: None, order: 1 };
     let rel = |p: &str| -> String {
         let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new(""));
         base.join(p).to_string_lossy().into_owned()
@@ -292,6 +302,12 @@ fn parse_deck(path: &str) -> Deck {
         match t[0].to_lowercase().as_str() {
             "mesh" if t.len() == 2 => d.mesh = rel(t[1]),
             "field" if t.len() == 3 => d.field = Some((rel(t[1]), num(t[2]))),
+            "order" if t.len() == 2 => {
+                d.order = num(t[1]) as usize;
+                if d.order < 1 || d.order > 2 {
+                    die("order must be 1 or 2");
+                }
+            }
             "mat" if t.len() >= 4 => {
                 let mut mt = Mat { eps: 1.0, tand: 0.0, mur: 1.0 };
                 for kv in t[2..].chunks(2) {
@@ -518,27 +534,57 @@ fn ldsolve(n: usize, sym: &Sym, w: &Work, b: &mut [Cx]) {
 
 const TE: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 const SE: [(usize, usize); 3] = [(0, 1), (0, 2), (1, 2)];
+const TF: [[usize; 3]; 4] = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]];
 // largest local basis size, reached by the second order tetrahedron
-const NB: usize = 6;
+const NB: usize = 20;
 
 // Value and curl of the local H(curl) basis of a tetrahedron at the point
 // with barycentric coordinates l, given the gradients g of those
 // coordinates. Order 1 is the six Whitney edge functions
 // W_ab = l_a grad l_b - l_b grad l_a, whose curl 2 grad l_a x grad l_b is
-// constant over the element.
-fn tbasis(g: &[V3; 4], l: [f64; 4], out: &mut Vec<(V3, V3)>) {
+// constant over the element. Order 2 appends the six curl free edge
+// gradients grad(l_a l_b) and then, per face abc, the pair l_a W_bc and
+// l_b W_ca; the third such product is minus their sum, so two are
+// independent. Element vertices arrive in ascending global order, so every
+// function is pinned by the global numbering and no signs are needed.
+fn tbasis(order: usize, g: &[V3; 4], l: [f64; 4], out: &mut Vec<(V3, V3)>) {
+    let w = |a: usize, b: usize| sub3(sc3(g[b], l[a]), sc3(g[a], l[b]));
+    let cw = |a: usize, b: usize| sc3(cross3(g[a], g[b]), 2.0);
     out.clear();
     for (a, b) in TE {
-        out.push((sub3(sc3(g[b], l[a]), sc3(g[a], l[b])), sc3(cross3(g[a], g[b]), 2.0)));
+        out.push((w(a, b), cw(a, b)));
+    }
+    if order < 2 {
+        return;
+    }
+    for (a, b) in TE {
+        out.push((add3(sc3(g[b], l[a]), sc3(g[a], l[b])), [0.0; 3]));
+    }
+    for f in TF {
+        for (x, y, z) in [(f[0], f[1], f[2]), (f[1], f[2], f[0])] {
+            // curl(l_x W_yz) = grad l_x x W_yz + l_x curl W_yz
+            out.push((sc3(w(y, z), l[x]), add3(cross3(g[x], w(y, z)), sc3(cw(y, z), l[x]))));
+        }
     }
 }
 
 // The same basis restricted to a boundary triangle, where only the value
-// matters. g holds the gradients of the surface barycentric coordinates.
-fn sbasis(g: &[V3; 3], l: [f64; 3], out: &mut Vec<V3>) {
+// matters. g holds the gradients of the surface barycentric coordinates,
+// whose tangential parts equal those of the volume gradients.
+fn sbasis(order: usize, g: &[V3; 3], l: [f64; 3], out: &mut Vec<V3>) {
+    let w = |a: usize, b: usize| sub3(sc3(g[b], l[a]), sc3(g[a], l[b]));
     out.clear();
     for (a, b) in SE {
-        out.push(sub3(sc3(g[b], l[a]), sc3(g[a], l[b])));
+        out.push(w(a, b));
+    }
+    if order < 2 {
+        return;
+    }
+    for (a, b) in SE {
+        out.push(add3(sc3(g[b], l[a]), sc3(g[a], l[b])));
+    }
+    for (x, y, z) in [(0, 1, 2), (1, 2, 0)] {
+        out.push(sc3(w(y, z), l[x]));
     }
 }
 
@@ -613,40 +659,89 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         }
     }
     let ne = emap.len();
-    let edge = |a: usize, b: usize| -> (usize, f64) {
-        let k = (a.min(b) as u32, a.max(b) as u32);
-        match emap.get(&k) {
-            Some(&e) => (e as usize, if a < b { 1.0 } else { -1.0 }),
+    let edge = |a: usize, b: usize| -> usize {
+        match emap.get(&(a.min(b) as u32, a.max(b) as u32)) {
+            Some(&e) => e as usize,
             None => die("boundary triangle does not match the volume mesh"),
         }
     };
-    // PEC: eliminate all edges of pec triangles. dof carries the numbering
-    // of the remaining unknowns, usize::MAX marks a constrained edge.
-    let mut dof = vec![0usize; ne];
+    // global faces, numbered for the order 2 face unknowns and carrying one
+    // adjacent tetrahedron for the abc material weight
+    let mut fmap: HashMap<[u32; 3], (usize, usize)> = HashMap::new();
+    let mut fnodes: Vec<[u32; 3]> = vec![];
+    for (ti, (t, _)) in mesh.tets.iter().enumerate() {
+        for f in TF {
+            let k = [t[f[0]] as u32, t[f[1]] as u32, t[f[2]] as u32];
+            let n = fnodes.len();
+            let e = fmap.entry(k).or_insert_with(|| {
+                fnodes.push(k);
+                (n, ti)
+            });
+            e.1 = ti;
+        }
+    }
+    let face = |t: &[usize]| -> usize {
+        match fmap.get(&[t[0] as u32, t[1] as u32, t[2] as u32]) {
+            Some(&(f, _)) => f,
+            None => die("boundary triangle does not match the volume mesh"),
+        }
+    };
+    // Unknowns sit in slots: p per edge, then nfd per face. usize::MAX
+    // marks a slot eliminated by a pec boundary, the rest are numbered.
+    let (p, nf) = (deck.order, fnodes.len());
+    let nfd = 2 * (p - 1);
+    let eslot = |e: usize, k: usize| e * p + k;
+    let fslot = |f: usize, k: usize| ne * p + f * nfd + k;
+    let mut dof = vec![0usize; ne * p + nf * nfd];
     for (t, g) in &mesh.tris {
         if role[*g] == 1 {
             for (a, b) in SE {
-                dof[edge(t[a], t[b]).0] = usize::MAX;
+                for k in 0..p {
+                    dof[eslot(edge(t[a], t[b]), k)] = usize::MAX;
+                }
+            }
+            for k in 0..nfd {
+                dof[fslot(face(t), k)] = usize::MAX;
             }
         }
     }
     let mut ndof = 0;
-    for e in 0..ne {
-        if dof[e] != usize::MAX {
-            dof[e] = ndof;
+    for s in dof.iter_mut() {
+        if *s != usize::MAX {
+            *s = ndof;
             ndof += 1;
         }
     }
-    let free = |e: usize| dof[e] != usize::MAX;
-    // boundary face -> adjacent tet, for the abc material weight
-    let mut fmap: HashMap<[u32; 3], usize> = HashMap::new();
-    for (ti, (t, _)) in mesh.tets.iter().enumerate() {
-        for f in [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]] {
-            let mut k = [t[f[0]] as u32, t[f[1]] as u32, t[f[2]] as u32];
-            k.sort();
-            fmap.insert(k, ti);
+    // Local unknowns of an element, in the order tbasis and sbasis produce
+    // their functions: edge whitney, edge gradients, then the face pairs.
+    let tdofs = |t: &[usize; 4]| -> [usize; NB] {
+        let mut ld = [usize::MAX; NB];
+        for i in 0..6 {
+            let e = edge(t[TE[i].0], t[TE[i].1]);
+            for k in 0..p {
+                ld[i + 6 * k] = dof[eslot(e, k)];
+            }
         }
-    }
+        for (j, f) in TF.iter().enumerate() {
+            for k in 0..nfd {
+                ld[12 + 2 * j + k] = dof[fslot(face(&[t[f[0]], t[f[1]], t[f[2]]]), k)];
+            }
+        }
+        ld
+    };
+    let sdofs = |t: &[usize; 3]| -> [usize; NB] {
+        let mut ld = [usize::MAX; NB];
+        for i in 0..3 {
+            let e = edge(t[SE[i].0], t[SE[i].1]);
+            for k in 0..p {
+                ld[i + 3 * k] = dof[eslot(e, k)];
+            }
+        }
+        for k in 0..nfd {
+            ld[6 + k] = dof[fslot(face(t), k)];
+        }
+        ld
+    };
     // port geometry: total area, extent h along dir, then width w = area / h
     let mut ports: Vec<PortDat> = deck
         .ports
@@ -691,18 +786,13 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     for (t, g) in &mesh.tets {
         let (gg, vol) = tetgrad([mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]], mesh.nodes[t[3]]]);
         let mg = &matg[*g];
-        // local dofs with their orientation sign, usize::MAX where eliminated
-        let mut ld = [(usize::MAX, 0.0f64); NB];
-        for i in 0..6 {
-            let (e, sg) = edge(t[TE[i].0], t[TE[i].1]);
-            ld[i] = (dof[e], sg);
-        }
-        let nb = 6;
+        let ld = tdofs(t);
+        let nb = 6 * p + 4 * nfd;
         for r in se.iter_mut().chain(me.iter_mut()) {
             r.fill(zero);
         }
         for &(w, l) in &qt {
-            tbasis(&gg, l, &mut bf);
+            tbasis(p, &gg, l, &mut bf);
             for i in 0..nb {
                 for j in i..nb {
                     se[i][j] = se[i][j] + cdot3(bf[i].1, bf[j].1, &mg.ws).rs(w * vol);
@@ -712,9 +802,8 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         }
         for i in 0..nb {
             for j in i..nb {
-                if ld[i].0 != usize::MAX && ld[j].0 != usize::MAX {
-                    let sg = ld[i].1 * ld[j].1;
-                    add(ld[i].0, ld[j].0, se[i][j].rs(sg), me[i][j].rs(sg), zero);
+                if ld[i] != usize::MAX && ld[j] != usize::MAX {
+                    add(ld[i], ld[j], se[i][j], me[i][j], zero);
                 }
             }
         }
@@ -738,30 +827,22 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         let wt = match port {
             Some(&p) => cx(ETA0 * ports[p].h / (ports[p].z0 * ports[p].w), 0.0),
             None => {
-                let ti = fmap[&{
-                    let mut k = [t[0] as u32, t[1] as u32, t[2] as u32];
-                    k.sort();
-                    k
-                }];
+                let ti = fmap[&[t[0] as u32, t[1] as u32, t[2] as u32]].1;
                 let mgf = &matg[mesh.tets[ti].1];
                 (mgf.epsc.rs(1.0 / mgf.mur)).sqrt()
             }
         };
-        let mut ld = [(usize::MAX, 0.0f64); NB];
-        for i in 0..3 {
-            let (e, sg) = edge(t[SE[i].0], t[SE[i].1]);
-            ld[i] = (dof[e], sg);
-        }
-        let nb = 3;
+        let ld = sdofs(t);
+        let nb = 3 * p + nfd;
         for r in me.iter_mut() {
             r.fill(zero);
         }
         let mut ex = [0.0f64; NB];
         for &(w, l) in &qs {
-            sbasis(&gs, l, &mut sf);
+            sbasis(p, &gs, l, &mut sf);
             for i in 0..nb {
-                if let Some(&p) = port {
-                    ex[i] += w * at * dot3(deck.ports[p].dir, sf[i]);
+                if let Some(&pt) = port {
+                    ex[i] += w * at * dot3(deck.ports[pt].dir, sf[i]);
                 }
                 for j in i..nb {
                     me[i][j] = me[i][j] + cx(dot3(sf[i], sf[j]) * w * at, 0.0);
@@ -769,15 +850,15 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
             }
         }
         for i in 0..nb {
-            if ld[i].0 == usize::MAX {
+            if ld[i] == usize::MAX {
                 continue;
             }
-            if let Some(&p) = port {
-                *ports[p].exc.entry(ld[i].0).or_insert(0.0) += ex[i] * ld[i].1;
+            if let Some(&pt) = port {
+                *ports[pt].exc.entry(ld[i]).or_insert(0.0) += ex[i];
             }
             for j in i..nb {
-                if ld[j].0 != usize::MAX {
-                    add(ld[i].0, ld[j].0, zero, zero, wt * me[i][j].rs(ld[i].1 * ld[j].1));
+                if ld[j] != usize::MAX {
+                    add(ld[i], ld[j], zero, zero, wt * me[i][j]);
                 }
             }
         }
@@ -786,11 +867,22 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     // triangle in CSC with a fixed slot per assembled entry
     let keys: Vec<(u32, u32)> = acc.keys().copied().collect();
     let mut pts = vec![[0.0; 3]; ndof];
-    for e in 0..ne {
-        if dof[e] != usize::MAX {
-            let (pa, pb) = (mesh.nodes[enodes[e].0 as usize], mesh.nodes[enodes[e].1 as usize]);
-            pts[dof[e]] = sc3([pa[0] + pb[0], pa[1] + pb[1], pa[2] + pb[2]], 0.5);
+    for (s, &d) in dof.iter().enumerate() {
+        if d == usize::MAX {
+            continue;
         }
+        // slot to its geometric location: edge midpoint or face centroid
+        pts[d] = if s < ne * p {
+            let e = enodes[s / p];
+            sc3(add3(mesh.nodes[e.0 as usize], mesh.nodes[e.1 as usize]), 0.5)
+        } else {
+            let f = fnodes[(s - ne * p) / nfd];
+            let mut c = [0.0; 3];
+            for v in f {
+                c = add3(c, mesh.nodes[v as usize]);
+            }
+            sc3(c, 1.0 / 3.0)
+        };
     }
     let perm = ndorder(ndof, &keys, &pts);
     let mut ap = vec![0usize; ndof + 1];
@@ -917,12 +1009,12 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         let mut bf = vec![];
         for (t, _) in &mesh.tets {
             let (gg, _) = tetgrad([mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]], mesh.nodes[t[3]]]);
-            tbasis(&gg, [0.25; 4], &mut bf);
+            tbasis(p, &gg, [0.25; 4], &mut bf);
+            let ld = tdofs(t);
             let mut e = [cx(0.0, 0.0); 3];
             for i in 0..bf.len() {
-                let (ei, sgn) = edge(t[TE[i].0], t[TE[i].1]);
-                if free(ei) {
-                    let x = rhs[perm[dof[ei]]].rs(sgn);
+                if ld[i] != usize::MAX {
+                    let x = rhs[perm[ld[i]]];
                     for k in 0..3 {
                         e[k] = e[k] + x.rs(bf[i].0[k]);
                     }

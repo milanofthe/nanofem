@@ -7,10 +7,10 @@ budget covers the solver alone: tests, comments and the models in models/ do
 not count toward it.
 
 nanofem solves the time harmonic curl-curl equation for the electric field
-with first order Nedelec (Whitney) edge elements on tetrahedra and computes
-scattering parameters at lumped ports. The mesh comes from Gmsh, the solver
-setup is a small text deck that maps physical group names to materials,
-boundaries and ports.
+with Nedelec edge elements on tetrahedra, first or second order, and
+computes scattering parameters at lumped ports. The mesh comes from Gmsh,
+the solver setup is a small text deck that maps physical group names to
+materials, boundaries and ports.
 
 ## Build and run
 
@@ -33,6 +33,7 @@ names defined in the Gmsh mesh.
 | `pml <group> <ax> <ay> <az>` | PML volume: imaginary coordinate stretch per axis |
 | `port <n> <group> <jx> <jy> <jz> <z0>` | lumped port: number, surface group, voltage direction, reference impedance |
 | `sweep lin <f0> <f1> <npoints>` | frequency sweep in Hz |
+| `order <1\|2>` | element order, default 1 |
 | `field <path.vtk> <f>` | E field snapshot at f with port 1 driven, legacy VTK |
 
 Volume groups without a `mat` card are vacuum. Surfaces without a role are
@@ -50,7 +51,12 @@ builds the geometry and mesh with Gmsh, patch.nfm is the matching deck.
     target/release/nanofem models/patch.nfm
 
 The sweep shows the resonance as an S11 dip at 2.40 GHz on the default
-mesh, about 2 percent below the mesh converged 2.45 GHz.
+mesh. That number is not converged: refining the mesh moves it to 2.48 GHz
+and adding `order 2` to the deck moves it to 2.53 GHz on the coarse mesh
+and 2.56 GHz on a medium one. Part of the remaining drift is the first
+order absorbing boundary, which sits only about a third of a wavelength
+above the patch. The model is meant to exercise the solver, not to be a
+converged antenna design.
 
 ## Mesh
 
@@ -66,8 +72,16 @@ E field export to VTK for ParaView. Direct solution with a complex symmetric
 sparse LDL^T after a geometric nested dissection ordering, frequencies run
 in parallel across threads. A PML region is declared in the deck by naming
 a mesh volume and the axes along which it absorbs; put nothing or PEC
-behind it. No modal waveguide ports, no adaptive refinement, first order
-elements only.
+behind it.
+
+Elements are first or second order. Second order adds the curl free edge
+gradients and two functions per face, 20 per tetrahedron instead of 6.
+Element vertices are sorted on input, so local edges and faces inherit the
+global numbering and no orientation signs are needed anywhere. Second order
+costs roughly five times the unknowns of the same mesh, so watch memory:
+each thread holds its own factorization.
+
+No modal waveguide ports, no adaptive refinement, no higher order geometry.
 
 ## Validation
 
@@ -76,5 +90,13 @@ results: a matched parallel plate TEM line (S11, S21 magnitude and phase), a
 lossy dielectric filled line against the analytic attenuation and phase, a
 shorted line reflecting with unit magnitude and the right phase, a
 deliberately mismatched port against the impedance transformation, an
-absorbing wall terminating a TEM wave, and a PEC box cavity resonating at
-the analytic mode frequency.
+absorbing wall terminating a TEM wave, a PML slab doing the same, and a PEC
+box cavity resonating at the analytic mode frequency.
+
+Element order is pinned by the convergence rate itself. The phase a wave
+accumulates over the TEM line is known exactly, so the error of a run is
+known exactly, and theory says it grows as k^(2p+1). Tripling the frequency
+must therefore multiply the error by about 27 at first order and about 243
+at second, which is what the tests require. That rate is a sharp check: a
+wrong sign or a mismatched face function between neighboring tetrahedra
+still gives plausible looking S-parameters, but it destroys the rate.

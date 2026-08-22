@@ -37,6 +37,17 @@ rectangular sheets: the direction vector points from one terminal to the
 other, the port height is the mesh extent along that direction and the width
 follows from the face area.
 
+## Example
+
+examples/ contains an edge fed 2.45 GHz microstrip patch antenna: patch.geo
+builds the geometry and mesh with Gmsh, patch.nfm is the matching deck.
+
+    gmsh -3 -format msh22 -o examples/patch.msh examples/patch.geo
+    target/release/nanofem examples/patch.nfm
+
+The sweep shows the resonance as an S11 dip at 2.40 GHz on the default
+mesh, about 2 percent below the mesh converged 2.45 GHz.
+
 ## Mesh
 
 Gmsh version 2.2 ASCII format (`gmsh -3 -format msh22 model.geo`). The

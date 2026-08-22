@@ -1,0 +1,8 @@
+* edge fed microstrip patch antenna, 2.45 GHz
+* mesh: gmsh -3 -format msh22 -o patch.msh patch.geo
+mesh patch.msh
+mat sub eps 2.2 tand 0.001
+pec pec
+abc open
+port 1 feed 0 0 1 200
+sweep lin 2.1e9 2.8e9 15

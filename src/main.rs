@@ -4,14 +4,16 @@
 // Algorithm: time harmonic (exp(+j w t)) curl-curl equation for the electric
 // field, discretized with first order Nedelec (Whitney) edge elements on
 // tetrahedra. Boundary conditions: PEC as eliminated unknowns, first order
-// absorbing boundary, natural PMC. Lumped rectangular ports are modeled as
-// impedance sheets with an impressed surface current (Norton equivalent);
-// scattering parameters follow from the port voltages. Materials carry
-// relative permittivity, loss tangent and permeability per mesh region.
+// absorbing boundary, PML regions as a complex coordinate stretch, natural
+// PMC. Lumped rectangular ports are modeled as impedance sheets with an
+// impressed surface current (Norton equivalent); scattering parameters
+// follow from the port voltages. Materials carry relative permittivity,
+// loss tangent and permeability per mesh region.
 // Input: a Gmsh .msh version 2.2 ASCII mesh with physical groups plus a deck
 // that maps group names to materials, boundaries and ports. Output:
-// Touchstone data on stdout. Linear algebra: reverse Cuthill-McKee ordering
-// and a complex symmetric skyline LDL^T factorization.
+// Touchstone data on stdout, optionally the E field as legacy VTK. Linear
+// algebra: geometric nested dissection ordering and a complex symmetric
+// sparse LDL^T factorization, one factorization per frequency in parallel.
 
 use std::collections::HashMap;
 
@@ -90,6 +92,25 @@ fn sc3(a: V3, s: f64) -> V3 { [a[0] * s, a[1] * s, a[2] * s] }
 // a^T diag(w) b for a diagonal complex material tensor
 fn cdot3(a: V3, b: V3, w: &[Cx; 3]) -> Cx {
     w[0].rs(a[0] * b[0]) + w[1].rs(a[1] * b[1]) + w[2].rs(a[2] * b[2])
+}
+
+// Gradients of the barycentric coordinates of a tetrahedron and its volume.
+// The gradients are constant over the element and carry all its geometry.
+fn tetgrad(p: [V3; 4]) -> ([V3; 4], f64) {
+    let (r1, r2, r3) = (sub3(p[1], p[0]), sub3(p[2], p[0]), sub3(p[3], p[0]));
+    let det = dot3(r1, cross3(r2, r3));
+    if det == 0.0 {
+        die("degenerate tetrahedron");
+    }
+    let g = [sc3(cross3(r2, r3), 1.0 / det), sc3(cross3(r3, r1), 1.0 / det), sc3(cross3(r1, r2), 1.0 / det)];
+    ([sub3(sub3(sub3([0.0; 3], g[0]), g[1]), g[2]), g[0], g[1], g[2]], det.abs() / 6.0)
+}
+
+// Mass matrix entry of two Whitney functions W_ab = l_a grad l_b - l_b grad
+// l_a, given the gradients and the integrals I(p,q) of l_p l_q over the
+// element. The same expression serves the tetrahedron and the face.
+fn wmass(g: &[V3], (a, b): (usize, usize), (c, d): (usize, usize), dot: &dyn Fn(V3, V3) -> Cx, i: &dyn Fn(usize, usize) -> f64) -> Cx {
+    dot(g[b], g[d]).rs(i(a, c)) - dot(g[b], g[c]).rs(i(a, d)) - dot(g[a], g[d]).rs(i(b, c)) + dot(g[a], g[c]).rs(i(b, d))
 }
 
 // ---------------------------------------------------------------- mesh
@@ -542,23 +563,24 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
             None => die("boundary triangle does not match the volume mesh"),
         }
     };
-    // PEC: eliminate all edges of pec triangles
-    let mut cons = vec![false; ne];
+    // PEC: eliminate all edges of pec triangles. dof carries the numbering
+    // of the remaining unknowns, usize::MAX marks a constrained edge.
+    let mut dof = vec![0usize; ne];
     for (t, g) in &mesh.tris {
         if role[*g] == 1 {
             for (a, b) in SE {
-                cons[edge(t[a], t[b]).0] = true;
+                dof[edge(t[a], t[b]).0] = usize::MAX;
             }
         }
     }
-    let mut dof = vec![usize::MAX; ne];
     let mut ndof = 0;
     for e in 0..ne {
-        if !cons[e] {
+        if dof[e] != usize::MAX {
             dof[e] = ndof;
             ndof += 1;
         }
     }
+    let free = |e: usize| dof[e] != usize::MAX;
     // boundary face -> adjacent tet, for the abc material weight
     let mut fmap: HashMap<[u32; 3], usize> = HashMap::new();
     for (ti, (t, _)) in mesh.tets.iter().enumerate() {
@@ -606,17 +628,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         e.2 = e.2 + b;
     };
     for (t, g) in &mesh.tets {
-        let p0 = mesh.nodes[t[0]];
-        let (r1, r2, r3) = (sub3(mesh.nodes[t[1]], p0), sub3(mesh.nodes[t[2]], p0), sub3(mesh.nodes[t[3]], p0));
-        let det = dot3(r1, cross3(r2, r3));
-        if det == 0.0 {
-            die("degenerate tetrahedron");
-        }
-        let vol = det.abs() / 6.0;
-        let g1 = sc3(cross3(r2, r3), 1.0 / det);
-        let g2 = sc3(cross3(r3, r1), 1.0 / det);
-        let g3 = sc3(cross3(r1, r2), 1.0 / det);
-        let gg = [sub3(sub3(sub3([0.0; 3], g1), g2), g3), g1, g2, g3];
+        let (gg, vol) = tetgrad([mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]], mesh.nodes[t[3]]]);
         let mg = &matg[*g];
         let ii = |p: usize, q: usize| vol * if p == q { 0.1 } else { 0.05 };
         let mut ed = [(0usize, 0.0f64); 6];
@@ -624,18 +636,16 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
             ed[i] = edge(t[TE[i].0], t[TE[i].1]);
         }
         for i in 0..6 {
-            if cons[ed[i].0] {
+            if !free(ed[i].0) {
                 continue;
             }
             for j in i..6 {
-                if cons[ed[j].0] {
+                if !free(ed[j].0) {
                     continue;
                 }
                 let ((a, b), (c, d)) = (TE[i], TE[j]);
                 let sij = cdot3(cross3(gg[a], gg[b]), cross3(gg[c], gg[d]), &mg.ws).rs(4.0 * vol);
-                let mij = cdot3(gg[b], gg[d], &mg.wm).rs(ii(a, c)) - cdot3(gg[b], gg[c], &mg.wm).rs(ii(a, d))
-                    - cdot3(gg[a], gg[d], &mg.wm).rs(ii(b, c))
-                    + cdot3(gg[a], gg[c], &mg.wm).rs(ii(b, d));
+                let mij = wmass(&gg, TE[i], TE[j], &|x, y| cdot3(x, y, &mg.wm), &ii);
                 let sg = ed[i].1 * ed[j].1;
                 add(dof[ed[i].0], dof[ed[j].0], sij.rs(sg), mij.rs(sg), cx(0.0, 0.0));
             }
@@ -675,7 +685,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
             ed[i] = edge(t[SE[i].0], t[SE[i].1]);
         }
         for i in 0..3 {
-            if cons[ed[i].0] {
+            if !free(ed[i].0) {
                 continue;
             }
             if let Some(&p) = port {
@@ -684,14 +694,11 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                 *ports[p].exc.entry(dof[ed[i].0]).or_insert(0.0) += c;
             }
             for j in i..3 {
-                if cons[ed[j].0] {
+                if !free(ed[j].0) {
                     continue;
                 }
-                let ((a, b), (c, d)) = (SE[i], SE[j]);
-                let tij = dot3(gs[b], gs[d]) * i2(a, c) - dot3(gs[b], gs[c]) * i2(a, d)
-                    - dot3(gs[a], gs[d]) * i2(b, c)
-                    + dot3(gs[a], gs[c]) * i2(b, d);
-                add(dof[ed[i].0], dof[ed[j].0], cx(0.0, 0.0), cx(0.0, 0.0), wt.rs(tij * ed[i].1 * ed[j].1));
+                let tij = wmass(&gs, SE[i], SE[j], &|x, y| cx(dot3(x, y), 0.0), &i2);
+                add(dof[ed[i].0], dof[ed[j].0], cx(0.0, 0.0), cx(0.0, 0.0), wt * tij.rs(ed[i].1 * ed[j].1));
             }
         }
     }
@@ -828,17 +835,11 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         ldsolve(ndof, &sym, &w, &mut rhs);
         let mut ef = Vec::with_capacity(mesh.tets.len());
         for (t, _) in &mesh.tets {
-            let p0 = mesh.nodes[t[0]];
-            let (r1, r2, r3) = (sub3(mesh.nodes[t[1]], p0), sub3(mesh.nodes[t[2]], p0), sub3(mesh.nodes[t[3]], p0));
-            let det = dot3(r1, cross3(r2, r3));
-            let g1 = sc3(cross3(r2, r3), 1.0 / det);
-            let g2 = sc3(cross3(r3, r1), 1.0 / det);
-            let g3 = sc3(cross3(r1, r2), 1.0 / det);
-            let gg = [sub3(sub3(sub3([0.0; 3], g1), g2), g3), g1, g2, g3];
+            let (gg, _) = tetgrad([mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]], mesh.nodes[t[3]]]);
             let mut e = [cx(0.0, 0.0); 3];
             for (a, b) in TE {
                 let (ei, sgn) = edge(t[a], t[b]);
-                if !cons[ei] {
+                if free(ei) {
                     let x = rhs[perm[dof[ei]]].rs(0.25 * sgn);
                     let d = sub3(gg[b], gg[a]);
                     for k in 0..3 {

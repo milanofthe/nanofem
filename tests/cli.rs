@@ -319,6 +319,8 @@ fn cavity_resonance() {
     assert!((best.0 - f101).abs() < 0.08e9, "resonance at {} GHz, expected {} GHz", best.0 / 1e9, f101 / 1e9);
 }
 
+// The budget covers the solver in src/main.rs alone. This test file and the
+// models in models/ are outside it.
 #[test]
 fn loc_budget() {
     let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();

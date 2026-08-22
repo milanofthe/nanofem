@@ -106,11 +106,43 @@ fn tetgrad(p: [V3; 4]) -> ([V3; 4], f64) {
     ([sub3(sub3(sub3([0.0; 3], g[0]), g[1]), g[2]), g[0], g[1], g[2]], det.abs() / 6.0)
 }
 
-// Mass matrix entry of two Whitney functions W_ab = l_a grad l_b - l_b grad
-// l_a, given the gradients and the integrals I(p,q) of l_p l_q over the
-// element. The same expression serves the tetrahedron and the face.
-fn wmass(g: &[V3], (a, b): (usize, usize), (c, d): (usize, usize), dot: &dyn Fn(V3, V3) -> Cx, i: &dyn Fn(usize, usize) -> f64) -> Cx {
-    dot(g[b], g[d]).rs(i(a, c)) - dot(g[b], g[c]).rs(i(a, d)) - dot(g[a], g[d]).rs(i(b, c)) + dot(g[a], g[c]).rs(i(b, d))
+// -------------------------------------------------------------- quadrature
+
+// Fully symmetric rules on the reference simplex, in barycentric
+// coordinates, with weights summing to one. The tetrahedron rule is exact
+// to degree 5 and the triangle rule to degree 4, which covers the mass
+// matrices of both element orders.
+fn qtet() -> Vec<(f64, [f64; 4])> {
+    let mut q = vec![];
+    for (w, a) in [(0.0734930431163619, 0.0927352503108912), (0.1126879257180162, 0.3108859192633005)] {
+        for k in 0..4 {
+            let mut p = [a; 4];
+            p[k] = 1.0 - 3.0 * a;
+            q.push((w, p));
+        }
+    }
+    let (w, a) = (0.0425460207770812, 0.0455037041256497);
+    for i in 0..3 {
+        for j in i + 1..4 {
+            let mut p = [0.5 - a; 4];
+            p[i] = a;
+            p[j] = a;
+            q.push((w, p));
+        }
+    }
+    q
+}
+
+fn qtri() -> Vec<(f64, [f64; 3])> {
+    let mut q = vec![];
+    for (w, a) in [(0.223381589678011, 0.445948490915965), (0.109951743655322, 0.091576213509771)] {
+        for k in 0..3 {
+            let mut p = [a; 3];
+            p[k] = 1.0 - 2.0 * a;
+            q.push((w, p));
+        }
+    }
+    q
 }
 
 // ---------------------------------------------------------------- mesh
@@ -482,10 +514,35 @@ fn ldsolve(n: usize, sym: &Sym, w: &Work, b: &mut [Cx]) {
     }
 }
 
-// ---------------------------------------------------------------- fem
+// ------------------------------------------------------------------ basis
 
 const TE: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 const SE: [(usize, usize); 3] = [(0, 1), (0, 2), (1, 2)];
+// largest local basis size, reached by the second order tetrahedron
+const NB: usize = 6;
+
+// Value and curl of the local H(curl) basis of a tetrahedron at the point
+// with barycentric coordinates l, given the gradients g of those
+// coordinates. Order 1 is the six Whitney edge functions
+// W_ab = l_a grad l_b - l_b grad l_a, whose curl 2 grad l_a x grad l_b is
+// constant over the element.
+fn tbasis(g: &[V3; 4], l: [f64; 4], out: &mut Vec<(V3, V3)>) {
+    out.clear();
+    for (a, b) in TE {
+        out.push((sub3(sc3(g[b], l[a]), sc3(g[a], l[b])), sc3(cross3(g[a], g[b]), 2.0)));
+    }
+}
+
+// The same basis restricted to a boundary triangle, where only the value
+// matters. g holds the gradients of the surface barycentric coordinates.
+fn sbasis(g: &[V3; 3], l: [f64; 3], out: &mut Vec<V3>) {
+    out.clear();
+    for (a, b) in SE {
+        out.push(sub3(sc3(g[b], l[a]), sc3(g[a], l[b])));
+    }
+}
+
+// ---------------------------------------------------------------- fem
 
 struct PortDat {
     z0: f64,
@@ -627,27 +684,38 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         e.1 = e.1 + m;
         e.2 = e.2 + b;
     };
+    let (qt, qs) = (qtet(), qtri());
+    let zero = cx(0.0, 0.0);
+    let (mut bf, mut sf) = (vec![], vec![]);
+    let (mut se, mut me) = ([[zero; NB]; NB], [[zero; NB]; NB]);
     for (t, g) in &mesh.tets {
         let (gg, vol) = tetgrad([mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]], mesh.nodes[t[3]]]);
         let mg = &matg[*g];
-        let ii = |p: usize, q: usize| vol * if p == q { 0.1 } else { 0.05 };
-        let mut ed = [(0usize, 0.0f64); 6];
+        // local dofs with their orientation sign, usize::MAX where eliminated
+        let mut ld = [(usize::MAX, 0.0f64); NB];
         for i in 0..6 {
-            ed[i] = edge(t[TE[i].0], t[TE[i].1]);
+            let (e, sg) = edge(t[TE[i].0], t[TE[i].1]);
+            ld[i] = (dof[e], sg);
         }
-        for i in 0..6 {
-            if !free(ed[i].0) {
-                continue;
-            }
-            for j in i..6 {
-                if !free(ed[j].0) {
-                    continue;
+        let nb = 6;
+        for r in se.iter_mut().chain(me.iter_mut()) {
+            r.fill(zero);
+        }
+        for &(w, l) in &qt {
+            tbasis(&gg, l, &mut bf);
+            for i in 0..nb {
+                for j in i..nb {
+                    se[i][j] = se[i][j] + cdot3(bf[i].1, bf[j].1, &mg.ws).rs(w * vol);
+                    me[i][j] = me[i][j] + cdot3(bf[i].0, bf[j].0, &mg.wm).rs(w * vol);
                 }
-                let ((a, b), (c, d)) = (TE[i], TE[j]);
-                let sij = cdot3(cross3(gg[a], gg[b]), cross3(gg[c], gg[d]), &mg.ws).rs(4.0 * vol);
-                let mij = wmass(&gg, TE[i], TE[j], &|x, y| cdot3(x, y, &mg.wm), &ii);
-                let sg = ed[i].1 * ed[j].1;
-                add(dof[ed[i].0], dof[ed[j].0], sij.rs(sg), mij.rs(sg), cx(0.0, 0.0));
+            }
+        }
+        for i in 0..nb {
+            for j in i..nb {
+                if ld[i].0 != usize::MAX && ld[j].0 != usize::MAX {
+                    let sg = ld[i].1 * ld[j].1;
+                    add(ld[i].0, ld[j].0, se[i][j].rs(sg), me[i][j].rs(sg), zero);
+                }
             }
         }
     }
@@ -679,26 +747,38 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                 (mgf.epsc.rs(1.0 / mgf.mur)).sqrt()
             }
         };
-        let i2 = |p: usize, q: usize| at * if p == q { 1.0 / 6.0 } else { 1.0 / 12.0 };
-        let mut ed = [(0usize, 0.0f64); 3];
+        let mut ld = [(usize::MAX, 0.0f64); NB];
         for i in 0..3 {
-            ed[i] = edge(t[SE[i].0], t[SE[i].1]);
+            let (e, sg) = edge(t[SE[i].0], t[SE[i].1]);
+            ld[i] = (dof[e], sg);
         }
-        for i in 0..3 {
-            if !free(ed[i].0) {
+        let nb = 3;
+        for r in me.iter_mut() {
+            r.fill(zero);
+        }
+        let mut ex = [0.0f64; NB];
+        for &(w, l) in &qs {
+            sbasis(&gs, l, &mut sf);
+            for i in 0..nb {
+                if let Some(&p) = port {
+                    ex[i] += w * at * dot3(deck.ports[p].dir, sf[i]);
+                }
+                for j in i..nb {
+                    me[i][j] = me[i][j] + cx(dot3(sf[i], sf[j]) * w * at, 0.0);
+                }
+            }
+        }
+        for i in 0..nb {
+            if ld[i].0 == usize::MAX {
                 continue;
             }
             if let Some(&p) = port {
-                let (a, b) = SE[i];
-                let c = at / 3.0 * dot3(deck.ports[p].dir, sub3(gs[b], gs[a])) * ed[i].1;
-                *ports[p].exc.entry(dof[ed[i].0]).or_insert(0.0) += c;
+                *ports[p].exc.entry(ld[i].0).or_insert(0.0) += ex[i] * ld[i].1;
             }
-            for j in i..3 {
-                if !free(ed[j].0) {
-                    continue;
+            for j in i..nb {
+                if ld[j].0 != usize::MAX {
+                    add(ld[i].0, ld[j].0, zero, zero, wt * me[i][j].rs(ld[i].1 * ld[j].1));
                 }
-                let tij = wmass(&gs, SE[i], SE[j], &|x, y| cx(dot3(x, y), 0.0), &i2);
-                add(dof[ed[i].0], dof[ed[j].0], cx(0.0, 0.0), cx(0.0, 0.0), wt * tij.rs(ed[i].1 * ed[j].1));
             }
         }
     }
@@ -834,16 +914,17 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         }
         ldsolve(ndof, &sym, &w, &mut rhs);
         let mut ef = Vec::with_capacity(mesh.tets.len());
+        let mut bf = vec![];
         for (t, _) in &mesh.tets {
             let (gg, _) = tetgrad([mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]], mesh.nodes[t[3]]]);
+            tbasis(&gg, [0.25; 4], &mut bf);
             let mut e = [cx(0.0, 0.0); 3];
-            for (a, b) in TE {
-                let (ei, sgn) = edge(t[a], t[b]);
+            for i in 0..bf.len() {
+                let (ei, sgn) = edge(t[TE[i].0], t[TE[i].1]);
                 if free(ei) {
-                    let x = rhs[perm[dof[ei]]].rs(0.25 * sgn);
-                    let d = sub3(gg[b], gg[a]);
+                    let x = rhs[perm[dof[ei]]].rs(sgn);
                     for k in 0..3 {
-                        e[k] = e[k] + x.rs(d[k]);
+                        e[k] = e[k] + x.rs(bf[i].0[k]);
                     }
                 }
             }

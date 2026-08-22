@@ -28,8 +28,10 @@ names defined in the Gmsh mesh.
 | `mat <group> eps <er> [tand <d>] [mur <mr>]` | material of a volume group |
 | `pec <group> ...` | perfect electric conductor surfaces |
 | `abc <group> ...` | first order absorbing boundary surfaces |
+| `pml <group> <ax> <ay> <az>` | PML volume: imaginary coordinate stretch per axis |
 | `port <n> <group> <jx> <jy> <jz> <z0>` | lumped port: number, surface group, voltage direction, reference impedance |
 | `sweep lin <f0> <f1> <npoints>` | frequency sweep in Hz |
+| `field <path.vtk> <f>` | E field snapshot at f with port 1 driven, legacy VTK |
 
 Volume groups without a `mat` card are vacuum. Surfaces without a role are
 natural boundaries, which for the curl-curl equation means PMC. Ports are
@@ -56,12 +58,14 @@ else in the file is ignored.
 
 ## Scope
 
-PEC, first order ABC, natural PMC, lossy dielectrics and magnetics per
-region, lumped rectangular ports with S-parameter extraction. Direct
-solution with a complex symmetric skyline LDL^T after reverse Cuthill-McKee
-ordering, so the practical problem size is a few tens of thousands of
-unknowns. No modal waveguide ports, no PML, no adaptive refinement, no field
-export.
+PEC, first order ABC, PML regions, natural PMC, lossy dielectrics and
+magnetics per region, lumped rectangular ports with S-parameter extraction,
+E field export to VTK for ParaView. Direct solution with a complex symmetric
+sparse LDL^T after a geometric nested dissection ordering, frequencies run
+in parallel across threads. A PML region is declared in the deck by naming
+a mesh volume and the axes along which it absorbs; put nothing or PEC
+behind it. No modal waveguide ports, no adaptive refinement, first order
+elements only.
 
 ## Validation
 

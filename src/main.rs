@@ -193,6 +193,7 @@ fn parse_msh(path: &str) -> Mesh {
 //   pml <group> <ax> <ay> <az>           (imaginary coordinate stretch per axis)
 //   port <n> <group> <jx> <jy> <jz> <z0> (n counting from 1, j = voltage direction)
 //   sweep lin <f0> <f1> <npoints>
+//   field <path.vtk> <f>                 (E field snapshot, port 1 driven)
 struct Mat {
     eps: f64,
     tand: f64,
@@ -215,6 +216,7 @@ struct Deck {
     f0: f64,
     f1: f64,
     nf: usize,
+    field: Option<(String, f64)>,
 }
 
 fn num(s: &str) -> f64 {
@@ -223,7 +225,11 @@ fn num(s: &str) -> f64 {
 
 fn parse_deck(path: &str) -> Deck {
     let txt = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("cannot read {}: {}", path, e)));
-    let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0 };
+    let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0, field: None };
+    let rel = |p: &str| -> String {
+        let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new(""));
+        base.join(p).to_string_lossy().into_owned()
+    };
     for l in txt.lines() {
         let t: Vec<&str> = l.split_whitespace().collect();
         if t.is_empty() || t[0].starts_with('*') {
@@ -231,10 +237,8 @@ fn parse_deck(path: &str) -> Deck {
         }
         let bad = || -> ! { die(&format!("bad card: {}", l)) };
         match t[0].to_lowercase().as_str() {
-            "mesh" if t.len() == 2 => {
-                let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new(""));
-                d.mesh = base.join(t[1]).to_string_lossy().into_owned();
-            }
+            "mesh" if t.len() == 2 => d.mesh = rel(t[1]),
+            "field" if t.len() == 3 => d.field = Some((rel(t[1]), num(t[2]))),
             "mat" if t.len() >= 4 => {
                 let mut mt = Mat { eps: 1.0, tand: 0.0, mur: 1.0 };
                 for kv in t[2..].chunks(2) {
@@ -805,6 +809,74 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     });
     for l in lines.into_inner().unwrap() {
         outln(format_args!("{}", l));
+    }
+    // field snapshot: solve once more at the requested frequency with port 1
+    // driven and write the E field per tet (centroid value, where the
+    // whitney functions reduce to (g_b - g_a) / 4) as legacy VTK cell data
+    if let Some((path, ff)) = &deck.field {
+        let k0 = 2.0 * std::f64::consts::PI * ff / C0;
+        let mut ax = vec![cx(0.0, 0.0); ents.len()];
+        for &(pos, s, m, b) in &ents {
+            ax[pos] = s + m.rs(-k0 * k0) + b.js(k0);
+        }
+        let mut w = work(ndof, &sym);
+        numeric(ndof, &ap, &ai, &ax, &sym, &mut w);
+        let mut rhs = vec![cx(0.0, 0.0); ndof];
+        for (&d, &c) in &ports[0].exc {
+            rhs[perm[d]] = cx(0.0, -k0 * ETA0 * c / ports[0].w);
+        }
+        ldsolve(ndof, &sym, &w, &mut rhs);
+        let mut ef = Vec::with_capacity(mesh.tets.len());
+        for (t, _) in &mesh.tets {
+            let p0 = mesh.nodes[t[0]];
+            let (r1, r2, r3) = (sub3(mesh.nodes[t[1]], p0), sub3(mesh.nodes[t[2]], p0), sub3(mesh.nodes[t[3]], p0));
+            let det = dot3(r1, cross3(r2, r3));
+            let g1 = sc3(cross3(r2, r3), 1.0 / det);
+            let g2 = sc3(cross3(r3, r1), 1.0 / det);
+            let g3 = sc3(cross3(r1, r2), 1.0 / det);
+            let gg = [sub3(sub3(sub3([0.0; 3], g1), g2), g3), g1, g2, g3];
+            let mut e = [cx(0.0, 0.0); 3];
+            for (a, b) in TE {
+                let (ei, sgn) = edge(t[a], t[b]);
+                if !cons[ei] {
+                    let x = rhs[perm[dof[ei]]].rs(0.25 * sgn);
+                    let d = sub3(gg[b], gg[a]);
+                    for k in 0..3 {
+                        e[k] = e[k] + x.rs(d[k]);
+                    }
+                }
+            }
+            ef.push(e);
+        }
+        let mut o = format!(
+            "# vtk DataFile Version 3.0\nnanofem E field at {} Hz, port 1 driven\nASCII\nDATASET UNSTRUCTURED_GRID\nPOINTS {} double\n",
+            ff,
+            mesh.nodes.len()
+        );
+        for p in &mesh.nodes {
+            o += &format!("{} {} {}\n", p[0], p[1], p[2]);
+        }
+        o += &format!("CELLS {} {}\n", mesh.tets.len(), 5 * mesh.tets.len());
+        for (t, _) in &mesh.tets {
+            o += &format!("4 {} {} {} {}\n", t[0], t[1], t[2], t[3]);
+        }
+        o += &format!("CELL_TYPES {}\n", mesh.tets.len());
+        o += &"10\n".repeat(mesh.tets.len());
+        o += &format!("CELL_DATA {}\nVECTORS Ere double\n", mesh.tets.len());
+        for e in &ef {
+            o += &format!("{:.6e} {:.6e} {:.6e}\n", e[0].re, e[1].re, e[2].re);
+        }
+        o += "VECTORS Eim double\n";
+        for e in &ef {
+            o += &format!("{:.6e} {:.6e} {:.6e}\n", e[0].im, e[1].im, e[2].im);
+        }
+        o += "SCALARS Emag double\nLOOKUP_TABLE default\n";
+        for e in &ef {
+            let m = (e[0].mag().powi(2) + e[1].mag().powi(2) + e[2].mag().powi(2)).sqrt();
+            o += &format!("{:.6e}\n", m);
+        }
+        std::fs::write(path, o).unwrap_or_else(|e| die(&format!("cannot write {}: {}", path, e)));
+        eprintln!("nanofem: field written to {}", path);
     }
 }
 

@@ -6,3 +6,4 @@ pec pec
 abc open
 port 1 feed 0 0 1 200
 sweep lin 2.1e9 2.8e9 15
+field patch.vtk 2.4e9

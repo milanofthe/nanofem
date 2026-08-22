@@ -257,6 +257,32 @@ fn abc_absorbs() {
 }
 
 #[test]
+fn pml_absorbs() {
+    // TEM line running into a 3 cell PML slab stretched along x, natural
+    // (PMC) wall behind it: the wave should not come back
+    let (lx, lyz) = (0.15, 0.01);
+    let mesh = box_msh(
+        "pml.msh",
+        [15, 1, 1],
+        [lx, lyz, lyz],
+        &move |x, _y, z| {
+            if z < 1e-12 || z > lyz - 1e-12 {
+                Some("pec")
+            } else if x < 1e-12 {
+                Some("p1")
+            } else {
+                None
+            }
+        },
+        &|x, _, _| if x > 0.12 { "pml" } else { "air" },
+    );
+    let deck = format!("mesh {}\npec pec\npml pml 3 0 0\nport 1 p1 0 0 1 {}\nsweep lin 1e9 1e9 1\n", mesh.display(), ETA0);
+    let rows = run("pml.nfm", &deck);
+    let s11 = mag(rows[0].1[0], rows[0].1[1]);
+    assert!(s11 < 0.08, "S11 = {}, pml should absorb the TEM wave", s11);
+}
+
+#[test]
 fn cavity_resonance() {
     // PEC box 0.1 x 0.05 x 0.1, aperture port in the x = 0 wall. The 101
     // mode resonates at c0 / 2 * sqrt(2) / 0.1 = 2.12 GHz and shows up as a

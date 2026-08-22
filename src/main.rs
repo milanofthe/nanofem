@@ -87,6 +87,10 @@ fn cross3(a: V3, b: V3) -> V3 {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 fn sc3(a: V3, s: f64) -> V3 { [a[0] * s, a[1] * s, a[2] * s] }
+// a^T diag(w) b for a diagonal complex material tensor
+fn cdot3(a: V3, b: V3, w: &[Cx; 3]) -> Cx {
+    w[0].rs(a[0] * b[0]) + w[1].rs(a[1] * b[1]) + w[2].rs(a[2] * b[2])
+}
 
 // ---------------------------------------------------------------- mesh
 
@@ -186,6 +190,7 @@ fn parse_msh(path: &str) -> Mesh {
 //   mat <group> eps <er> [tand <d>] [mur <mr>]
 //   pec <group> [<group> ...]
 //   abc <group> [<group> ...]
+//   pml <group> <ax> <ay> <az>           (imaginary coordinate stretch per axis)
 //   port <n> <group> <jx> <jy> <jz> <z0> (n counting from 1, j = voltage direction)
 //   sweep lin <f0> <f1> <npoints>
 struct Mat {
@@ -203,6 +208,7 @@ struct PortDef {
 struct Deck {
     mesh: String,
     mats: Vec<(String, Mat)>,
+    pmls: Vec<(String, V3)>,
     pec: Vec<String>,
     abc: Vec<String>,
     ports: Vec<PortDef>,
@@ -217,7 +223,7 @@ fn num(s: &str) -> f64 {
 
 fn parse_deck(path: &str) -> Deck {
     let txt = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("cannot read {}: {}", path, e)));
-    let mut d = Deck { mesh: String::new(), mats: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0 };
+    let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0 };
     for l in txt.lines() {
         let t: Vec<&str> = l.split_whitespace().collect();
         if t.is_empty() || t[0].starts_with('*') {
@@ -243,6 +249,7 @@ fn parse_deck(path: &str) -> Deck {
             }
             "pec" if t.len() >= 2 => d.pec.extend(t[1..].iter().map(|s| s.to_string())),
             "abc" if t.len() >= 2 => d.abc.extend(t[1..].iter().map(|s| s.to_string())),
+            "pml" if t.len() == 5 => d.pmls.push((t[1].to_string(), [num(t[2]), num(t[3]), num(t[4])])),
             "port" if t.len() == 7 => {
                 if num(t[1]) as usize != d.ports.len() + 1 {
                     die("ports must be numbered 1, 2, ... in order");
@@ -481,10 +488,35 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     for (p, pd) in deck.ports.iter().enumerate() {
         pmap.insert(gidx(&pd.group), p);
     }
-    // materials per volume group: (complex eps, mur)
-    let mut matg = vec![(cx(1.0, 0.0), 1.0); ng];
+    // materials per volume group. A pml region stretches coordinate k by
+    // s_k = 1 - j a_k; eps and mu both get the diagonal tensor
+    // L_k = s_x s_y s_z / s_k^2, which keeps the wave impedance matched
+    // while fields decay along the stretched axes.
+    struct Mg {
+        epsc: Cx,
+        mur: f64,
+        wm: [Cx; 3], // mass weight, the eps tensor
+        ws: [Cx; 3], // stiffness weight, the 1/mu tensor
+    }
+    let one = cx(1.0, 0.0);
+    let mut matg: Vec<Mg> = (0..ng).map(|_| Mg { epsc: one, mur: 1.0, wm: [one; 3], ws: [one; 3] }).collect();
     for (name, mt) in &deck.mats {
-        matg[gidx(name)] = (cx(mt.eps, -mt.eps * mt.tand), mt.mur);
+        let g = &mut matg[gidx(name)];
+        g.epsc = cx(mt.eps, -mt.eps * mt.tand);
+        g.mur = mt.mur;
+    }
+    let mut stretch = vec![[0.0; 3]; ng];
+    for (name, a) in &deck.pmls {
+        stretch[gidx(name)] = *a;
+    }
+    for g in 0..ng {
+        let s = [cx(1.0, -stretch[g][0]), cx(1.0, -stretch[g][1]), cx(1.0, -stretch[g][2])];
+        let prod = s[0] * s[1] * s[2];
+        for k in 0..3 {
+            let lam = prod / (s[k] * s[k]);
+            matg[g].wm[k] = matg[g].epsc * lam;
+            matg[g].ws[k] = (one / lam).rs(1.0 / matg[g].mur);
+        }
     }
     // global edges, oriented low node -> high node
     let mut emap: HashMap<(u32, u32), u32> = HashMap::new();
@@ -561,11 +593,11 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     // assembly: per matrix entry (upper, dof indices) keep the frequency
     // independent parts (curl stiffness s, eps weighted mass m, boundary b)
     // and combine per frequency as s - k0^2 m + j k0 b
-    let mut acc: HashMap<(u32, u32), (f64, Cx, Cx)> = HashMap::new();
-    let mut add = |di: usize, dj: usize, s: f64, m: Cx, b: Cx| {
+    let mut acc: HashMap<(u32, u32), (Cx, Cx, Cx)> = HashMap::new();
+    let mut add = |di: usize, dj: usize, s: Cx, m: Cx, b: Cx| {
         let k = (di.min(dj) as u32, di.max(dj) as u32);
-        let e = acc.entry(k).or_insert((0.0, cx(0.0, 0.0), cx(0.0, 0.0)));
-        e.0 += s;
+        let e = acc.entry(k).or_insert((cx(0.0, 0.0), cx(0.0, 0.0), cx(0.0, 0.0)));
+        e.0 = e.0 + s;
         e.1 = e.1 + m;
         e.2 = e.2 + b;
     };
@@ -581,7 +613,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         let g2 = sc3(cross3(r3, r1), 1.0 / det);
         let g3 = sc3(cross3(r1, r2), 1.0 / det);
         let gg = [sub3(sub3(sub3([0.0; 3], g1), g2), g3), g1, g2, g3];
-        let (epsc, mur) = matg[*g];
+        let mg = &matg[*g];
         let ii = |p: usize, q: usize| vol * if p == q { 0.1 } else { 0.05 };
         let mut ed = [(0usize, 0.0f64); 6];
         for i in 0..6 {
@@ -596,12 +628,12 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                     continue;
                 }
                 let ((a, b), (c, d)) = (TE[i], TE[j]);
-                let sij = 4.0 * vol * dot3(cross3(gg[a], gg[b]), cross3(gg[c], gg[d]));
-                let mij = dot3(gg[b], gg[d]) * ii(a, c) - dot3(gg[b], gg[c]) * ii(a, d)
-                    - dot3(gg[a], gg[d]) * ii(b, c)
-                    + dot3(gg[a], gg[c]) * ii(b, d);
+                let sij = cdot3(cross3(gg[a], gg[b]), cross3(gg[c], gg[d]), &mg.ws).rs(4.0 * vol);
+                let mij = cdot3(gg[b], gg[d], &mg.wm).rs(ii(a, c)) - cdot3(gg[b], gg[c], &mg.wm).rs(ii(a, d))
+                    - cdot3(gg[a], gg[d], &mg.wm).rs(ii(b, c))
+                    + cdot3(gg[a], gg[c], &mg.wm).rs(ii(b, d));
                 let sg = ed[i].1 * ed[j].1;
-                add(dof[ed[i].0], dof[ed[j].0], sij * sg / mur, epsc.rs(mij * sg), cx(0.0, 0.0));
+                add(dof[ed[i].0], dof[ed[j].0], sij.rs(sg), mij.rs(sg), cx(0.0, 0.0));
             }
         }
     }
@@ -629,8 +661,8 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                     k.sort();
                     k
                 }];
-                let (epsc, mur) = matg[mesh.tets[ti].1];
-                (epsc.rs(1.0 / mur)).sqrt()
+                let mgf = &matg[mesh.tets[ti].1];
+                (mgf.epsc.rs(1.0 / mgf.mur)).sqrt()
             }
         };
         let i2 = |p: usize, q: usize| at * if p == q { 1.0 / 6.0 } else { 1.0 / 12.0 };
@@ -655,7 +687,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                 let tij = dot3(gs[b], gs[d]) * i2(a, c) - dot3(gs[b], gs[c]) * i2(a, d)
                     - dot3(gs[a], gs[d]) * i2(b, c)
                     + dot3(gs[a], gs[c]) * i2(b, d);
-                add(dof[ed[i].0], dof[ed[j].0], 0.0, cx(0.0, 0.0), wt.rs(tij * ed[i].1 * ed[j].1));
+                add(dof[ed[i].0], dof[ed[j].0], cx(0.0, 0.0), cx(0.0, 0.0), wt.rs(tij * ed[i].1 * ed[j].1));
             }
         }
     }
@@ -679,7 +711,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     }
     let mut nxt = ap.clone();
     let mut ai = vec![0u32; keys.len()];
-    let ents: Vec<(usize, f64, Cx, Cx)> = acc
+    let ents: Vec<(usize, Cx, Cx, Cx)> = acc
         .iter()
         .map(|(&(a, b), &(s, m, bb))| {
             let (i, j) = (perm[a as usize].min(perm[b as usize]), perm[a as usize].max(perm[b as usize]));
@@ -724,7 +756,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                 for fi in (t..freqs.len()).step_by(nt) {
                     let k0 = 2.0 * std::f64::consts::PI * freqs[fi] / C0;
                     for &(pos, s, m, b) in ents.iter() {
-                        ax[pos] = cx(s, 0.0) + m.rs(-k0 * k0) + b.js(k0);
+                        ax[pos] = s + m.rs(-k0 * k0) + b.js(k0);
                     }
                     numeric(ndof, ap, ai, &ax, sym, &mut w);
                     let mut smat = vec![vec![cx(0.0, 0.0); np]; np];

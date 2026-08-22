@@ -257,22 +257,6 @@ fn num(s: &str) -> f64 {
     s.parse().unwrap_or_else(|_| die(&format!("bad number '{}'", s)))
 }
 
-// deck values that are meaningless outside their range
-fn pos(s: &str, what: &str) -> f64 {
-    let v = num(s);
-    if !(v > 0.0) {
-        die(&format!("{} must be positive, got {}", what, s));
-    }
-    v
-}
-
-fn nonneg(s: &str, what: &str) -> f64 {
-    let v = num(s);
-    if !(v >= 0.0) {
-        die(&format!("{} must not be negative, got {}", what, s));
-    }
-    v
-}
 
 fn parse_deck(path: &str) -> Deck {
     let txt = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("cannot read {}: {}", path, e)));
@@ -297,10 +281,10 @@ fn parse_deck(path: &str) -> Deck {
                 let mut mt = Mat { eps: 1.0, tand: 0.0, mur: 1.0, sigma: 0.0 };
                 for kv in t[2..].chunks(2) {
                     match kv[0].to_lowercase().as_str() {
-                        "eps" => mt.eps = pos(kv[1], "eps"),
-                        "tand" => mt.tand = nonneg(kv[1], "tand"),
-                        "mur" => mt.mur = pos(kv[1], "mur"),
-                        "sigma" => mt.sigma = nonneg(kv[1], "sigma"),
+                        "eps" => mt.eps = num(kv[1]),
+                        "tand" => mt.tand = num(kv[1]),
+                        "mur" => mt.mur = num(kv[1]),
+                        "sigma" => mt.sigma = num(kv[1]),
                         _ => bad(),
                     }
                 }
@@ -309,7 +293,7 @@ fn parse_deck(path: &str) -> Deck {
             "pec" if t.len() >= 2 => d.pec.extend(t[1..].iter().map(|s| s.to_string())),
             "abc" if t.len() >= 2 => d.abc.extend(t[1..].iter().map(|s| s.to_string())),
             "pml" if t.len() == 5 => d.pmls.push((t[1].to_string(), [num(t[2]), num(t[3]), num(t[4])])),
-            "metal" if t.len() == 3 => d.metals.push((t[1].to_string(), pos(t[2], "metal conductivity"))),
+            "metal" if t.len() == 3 => d.metals.push((t[1].to_string(), num(t[2]))),
             "port" if t.len() == 7 => {
                 if num(t[1]) as usize != d.ports.len() + 1 {
                     die("ports must be numbered 1, 2, ... in order");
@@ -319,12 +303,11 @@ fn parse_deck(path: &str) -> Deck {
                 if n == 0.0 {
                     die("port direction must be nonzero");
                 }
-                let z0 = pos(t[6], "port reference impedance");
-                d.ports.push(PortDef { group: t[2].to_string(), dir: sc3(dir, 1.0 / n), z0 });
+                d.ports.push(PortDef { group: t[2].to_string(), dir: sc3(dir, 1.0 / n), z0: num(t[6]) });
             }
             "sweep" if t.len() == 5 && t[1] == "lin" => {
-                d.f0 = pos(t[2], "sweep start frequency");
-                d.f1 = pos(t[3], "sweep stop frequency");
+                d.f0 = num(t[2]);
+                d.f1 = num(t[3]);
                 d.nf = num(t[4]) as usize;
             }
             _ => bad(),
@@ -676,26 +659,9 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     for (p, pd) in deck.ports.iter().enumerate() {
         pmap.insert(gidx(&pd.group), p);
     }
-    // A surface role named on a volume group, or a material named on a
-    // surface group, would silently do nothing and leave a plausible
-    // looking answer for the wrong model, so both are refused here.
-    let (mut ntri, mut ntet) = (vec![0usize; ng], vec![0usize; ng]);
-    for (_, g) in &mesh.tris {
-        ntri[*g] += 1;
-    }
+    let mut ntet = vec![0usize; ng];
     for (_, g) in &mesh.tets {
         ntet[*g] += 1;
-    }
-    let need = |n: &str, c: &[usize], what: &str| {
-        if c[gidx(n)] == 0 {
-            die(&format!("group '{}' carries no {}", n, what));
-        }
-    };
-    for n in deck.pec.iter().chain(&deck.abc).chain(deck.metals.iter().map(|(n, _)| n)).chain(deck.ports.iter().map(|p| &p.group)) {
-        need(n, &ntri, "boundary triangles");
-    }
-    for n in deck.mats.iter().map(|(n, _)| n).chain(deck.pmls.iter().map(|(n, _)| n)) {
-        need(n, &ntet, "tetrahedra");
     }
     // Echo how each mesh group was understood. A group the deck never names
     // is legal but silently becomes vacuum or a natural PMC wall, which is

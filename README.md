@@ -105,9 +105,10 @@ regularizes its nullspace, and it grows again once the mesh gets coarse
 against the wavelength, so it tells you whether the run was in the
 trustworthy regime.
 
-Malformed input is refused with a message rather than a panic: truncated
-mesh lines, values outside their meaningful range, and a boundary role
-named on a volume group or a material named on a surface group.
+A malformed mesh file is reported rather than indexed past the end, but
+nanofem does not otherwise police the deck. Checking that a model makes
+sense is the job of whatever generates the deck, the same division of
+labour nanospice uses for netlists.
 
 ## Validation
 

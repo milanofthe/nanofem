@@ -17,7 +17,11 @@ boundaries and ports.
     cargo build --release
     target/release/nanofem antenna.nfm
 
-Output is Touchstone data on stdout, diagnostics go to stderr.
+Output is Touchstone data on stdout, diagnostics go to stderr. The `output`
+card switches to derived port quantities, printed as comma separated values
+with a header: `z` and `y` give the impedance and admittance matrices, `lq`
+reads each port as a coil and gives its inductance and quality factor. Those
+are the numbers an inductor or interconnect extraction actually wants.
 
 ## Deck format
 
@@ -27,13 +31,15 @@ names defined in the Gmsh mesh.
 | Card | Meaning |
 |---|---|
 | `mesh <path>` | Gmsh .msh v2.2 ASCII mesh, path relative to the deck |
-| `mat <group> eps <er> [tand <d>] [mur <mr>]` | material of a volume group |
+| `mat <group> eps <er> [tand <d>] [mur <mr>] [sigma <s>]` | material of a volume group, sigma in S/m |
 | `pec <group> ...` | perfect electric conductor surfaces |
 | `abc <group> ...` | first order absorbing boundary surfaces |
 | `pml <group> <ax> <ay> <az>` | PML volume: imaginary coordinate stretch per axis |
+| `metal <group> <sigma>` | lossy conductor sheet of conductivity sigma in S/m |
 | `port <n> <group> <jx> <jy> <jz> <z0>` | lumped port: number, surface group, voltage direction, reference impedance |
 | `sweep lin <f0> <f1> <npoints>` | frequency sweep in Hz |
 | `field <path.vtk> <f>` | E field snapshot at f with port 1 driven, legacy VTK |
+| `output <s\|z\|y\|lq>` | what to print, default s |
 
 Volume groups without a `mat` card are vacuum. Surfaces without a role are
 natural boundaries, which for the curl-curl equation means PMC. Ports are
@@ -64,13 +70,40 @@ else in the file is ignored.
 ## Scope
 
 PEC, first order ABC, PML regions, natural PMC, lossy dielectrics and
-magnetics per region, lumped rectangular ports with S-parameter extraction,
-E field export to VTK for ParaView. Direct solution with a complex symmetric
+magnetics per region, conductive volumes, lossy conductor sheets with the
+skin effect, lumped rectangular ports with S, Z, Y and LQ extraction, E
+field export to VTK for ParaView.
+
+Loss comes in three forms. A dielectric loss tangent scales the imaginary
+part of eps. A volume conductivity adds a conduction current, which enters
+the system as a term linear in the wave number. A `metal` surface carries
+the impedance of a good conductor, whose surface resistance grows with the
+square root of frequency; every matrix entry therefore keeps four
+frequency independent coefficients, against 1, k0, k0 squared and the
+square root of k0, so the whole assembly still happens once for an entire
+sweep. Direct solution with a complex symmetric
 sparse LDL^T after a geometric nested dissection ordering, frequencies run
 in parallel across threads. A PML region is declared in the deck by naming
 a mesh volume and the axes along which it absorbs; put nothing or PEC
 behind it. No modal waveguide ports, no adaptive refinement, first order
 elements only.
+
+## Diagnostics
+
+Before solving, nanofem prints on stderr how it understood every physical
+group in the mesh, including the ones the deck never names, since a group
+that silently defaults to vacuum or to a natural PMC wall is the one
+mistake input validation cannot catch. After the sweep it prints the worst
+pivot spread of the factorizations, a free lower bound on the condition
+number. That number grows like one over frequency squared towards low
+frequency, where the curl curl operator loses the mass term that
+regularizes its nullspace, and it grows again once the mesh gets coarse
+against the wavelength, so it tells you whether the run was in the
+trustworthy regime.
+
+Malformed input is refused with a message rather than a panic: truncated
+mesh lines, values outside their meaningful range, and a boundary role
+named on a volume group or a material named on a surface group.
 
 ## Validation
 

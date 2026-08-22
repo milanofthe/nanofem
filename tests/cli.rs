@@ -112,9 +112,9 @@ fn run(deck_name: &str, deck: &str) -> Vec<(f64, Vec<f64>)> {
     String::from_utf8(out.stdout)
         .unwrap()
         .lines()
-        .filter(|l| !l.trim().is_empty() && !l.starts_with('#') && !l.starts_with('!'))
+        .filter(|l| l.trim().starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '+'))
         .map(|l| {
-            let v: Vec<f64> = l.split_whitespace().map(|s| s.parse().unwrap()).collect();
+            let v: Vec<f64> = l.split([',', ' ', '\t']).filter(|s| !s.is_empty()).map(|s| s.parse().unwrap()).collect();
             (v[0], v[1..].to_vec())
         })
         .collect()
@@ -408,6 +408,36 @@ fn conductor_loss() {
     let got = mag(v[2], v[3]);
     assert!((got - expect).abs() < 0.01, "S21 = {}, analytic {}", got, expect);
     assert!(got < 0.99, "metal loss produced no measurable attenuation");
+}
+
+// A shorted line seen from its port is a coil: Z = j Z0 tan(k0 L), so the
+// derived outputs all have a closed form. Checks the S to Z conversion, the
+// inversion to Y, and the inductance read off Z.
+#[test]
+fn derived_port_parameters() {
+    let f = 1e8;
+    let (w, l) = (2.0 * std::f64::consts::PI * f, 0.12);
+    let zex = ETA0 * (w / C0 * l).tan();
+    let one = |o: &str| {
+        let mesh = tem_mesh(&format!("drv{}.msh", o), "pec");
+        let deck = format!(
+            "mesh {}\npec pec\noutput {}\nport 1 p1 0 0 1 {}\nsweep lin {} {} 1\n",
+            mesh.display(),
+            o,
+            ETA0,
+            f,
+            f
+        );
+        run(&format!("drv{}.nfm", o), &deck)[0].1.clone()
+    };
+    let z = one("z");
+    assert!(z[0].abs() < 1e-3 * zex, "lossless line has Re(Z) = {}", z[0]);
+    assert!((z[1] - zex).abs() < 0.01 * zex, "Im(Z) = {}, analytic {}", z[1], zex);
+    let y = one("y");
+    assert!((y[1] + 1.0 / zex).abs() < 0.01 / zex, "Im(Y) = {}, analytic {}", y[1], -1.0 / zex);
+    let lq = one("lq");
+    assert!((lq[0] - zex / w).abs() < 0.01 * zex / w, "L = {}, analytic {}", lq[0], zex / w);
+    assert!(lq[1] > 1e6, "lossless coil should have a huge Q, got {}", lq[1]);
 }
 
 // Runs nanofem and returns stderr, expecting it to refuse the input. A

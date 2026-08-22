@@ -224,6 +224,7 @@ fn parse_msh(path: &str) -> Mesh {
 //   port <n> <group> <jx> <jy> <jz> <z0> (n counting from 1, j = voltage direction)
 //   sweep lin <f0> <f1> <npoints>
 //   field <path.vtk> <f>                 (E field snapshot, port 1 driven)
+//   output <s|z|y|lq>                    (s is touchstone, the rest is csv)
 struct Mat {
     eps: f64,
     tand: f64,
@@ -249,6 +250,7 @@ struct Deck {
     f1: f64,
     nf: usize,
     field: Option<(String, f64)>,
+    out: char,
 }
 
 fn num(s: &str) -> f64 {
@@ -274,7 +276,7 @@ fn nonneg(s: &str, what: &str) -> f64 {
 
 fn parse_deck(path: &str) -> Deck {
     let txt = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("cannot read {}: {}", path, e)));
-    let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], metals: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0, field: None };
+    let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], metals: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0, field: None, out: 's' };
     let rel = |p: &str| -> String {
         let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new(""));
         base.join(p).to_string_lossy().into_owned()
@@ -288,6 +290,9 @@ fn parse_deck(path: &str) -> Deck {
         match t[0].to_lowercase().as_str() {
             "mesh" if t.len() == 2 => d.mesh = rel(t[1]),
             "field" if t.len() == 3 => d.field = Some((rel(t[1]), num(t[2]))),
+            "output" if t.len() == 2 && "szyl".contains(&t[1][..1]) => {
+                d.out = if t[1] == "lq" { 'l' } else { t[1].chars().next().unwrap() };
+            }
             "mat" if t.len() >= 4 => {
                 let mut mt = Mat { eps: 1.0, tand: 0.0, mur: 1.0, sigma: 0.0 };
                 for kv in t[2..].chunks(2) {
@@ -511,6 +516,44 @@ fn ldsolve(n: usize, sym: &Sym, w: &Fac, b: &mut [Cx]) {
             s = s - w.lx[p] * b[w.li[p] as usize];
         }
         b[j] = s;
+    }
+}
+
+// Solves A X = B for a small dense complex system, Gauss with partial
+// pivoting, both n by n and row major. B is overwritten with X.
+fn dsolve(n: usize, a: &mut [Cx], b: &mut [Cx]) {
+    for k in 0..n {
+        let mut p = k;
+        for i in k + 1..n {
+            if a[i * n + k].mag() > a[p * n + k].mag() {
+                p = i;
+            }
+        }
+        if a[p * n + k].mag() == 0.0 {
+            die("port matrix is singular, cannot convert the parameters");
+        }
+        for j in 0..n {
+            a.swap(k * n + j, p * n + j);
+            b.swap(k * n + j, p * n + j);
+        }
+        for i in k + 1..n {
+            let f = a[i * n + k] / a[k * n + k];
+            for j in k..n {
+                a[i * n + j] = a[i * n + j] - f * a[k * n + j];
+            }
+            for j in 0..n {
+                b[i * n + j] = b[i * n + j] - f * b[k * n + j];
+            }
+        }
+    }
+    for k in (0..n).rev() {
+        for j in 0..n {
+            let mut v = b[k * n + j];
+            for i in k + 1..n {
+                v = v - a[k * n + i] * b[i * n + j];
+            }
+            b[k * n + j] = v / a[k * n + k];
+        }
     }
 }
 
@@ -831,7 +874,26 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     // Frequencies run in parallel, thread count capped by memory (4 GB for
     // the factorizations), lines are printed in order afterwards.
     let np = ports.len();
-    outln(format_args!("# Hz S RI R {}", ports[0].z0));
+    match deck.out {
+        's' => outln(format_args!("# Hz S RI R {}", ports[0].z0)),
+        'l' => {
+            let mut h = "f".to_string();
+            for q in 1..=np {
+                h += &format!(",L{q},Q{q}");
+            }
+            outln(format_args!("{}", h));
+        }
+        c => {
+            let n = c.to_ascii_uppercase();
+            let mut h = "f".to_string();
+            for q in 1..=np {
+                for p in 1..=np {
+                    h += &format!(",re({n}{q}{p}),im({n}{q}{p})");
+                }
+            }
+            outln(format_args!("{}", h));
+        }
+    }
     let freqs: Vec<f64> = (0..deck.nf)
         .map(|fi| if deck.nf == 1 { deck.f0 } else { deck.f0 + (deck.f1 - deck.f0) * fi as f64 / (deck.nf - 1) as f64 })
         .collect();
@@ -879,23 +941,58 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                             }
                         }
                     }
-                    // touchstone: 2-port data is S11 S21 S12 S22 on one
-                    // line, larger matrices row by row
-                    let pair = |s: Cx| format!(" {:.9e} {:.9e}", s.re, s.im);
+                    // Touchstone keeps 2-port data as S11 S21 S12 S22 on
+                    // one line and larger matrices row by row. The derived
+                    // forms are plain csv: Z = D (I+S)(I-S)^-1 D with D the
+                    // square root of the reference impedances, Y its
+                    // inverse, and for lq the port self impedance read as a
+                    // coil, L = Im(Z)/w and Q = Im(Z)/Re(Z).
+                    // touchstone is whitespace separated, the derived csv
+                    // forms are comma separated to match their header
+                    let sep = if deck.out == 's' { " " } else { "," };
+                    let pair = |s: Cx| format!("{sep}{:.9e}{sep}{:.9e}", s.re, s.im);
                     let mut out = format!("{:.9e}", freqs[fi]);
-                    if np <= 2 {
-                        for p in 0..np {
-                            for q in 0..np {
-                                out += &pair(smat[q][p]);
+                    if deck.out == 's' {
+                        for q in 0..np {
+                            for p in 0..np {
+                                out += &pair(if np <= 2 { smat[p][q] } else { smat[q][p] });
+                            }
+                            if np > 2 && q + 1 < np {
+                                out += "\n";
                             }
                         }
                     } else {
+                        let (mut a, mut b) = (vec![cx(0.0, 0.0); np * np], vec![cx(0.0, 0.0); np * np]);
                         for q in 0..np {
                             for p in 0..np {
-                                out += &pair(smat[q][p]);
+                                let d = if p == q { cx(1.0, 0.0) } else { cx(0.0, 0.0) };
+                                a[q * np + p] = d - smat[q][p];
+                                b[q * np + p] = d + smat[q][p];
                             }
-                            if q + 1 < np {
-                                out += "\n";
+                        }
+                        dsolve(np, &mut a, &mut b);
+                        for q in 0..np {
+                            for p in 0..np {
+                                b[q * np + p] = b[q * np + p].rs((ports[q].z0 * ports[p].z0).sqrt());
+                            }
+                        }
+                        if deck.out == 'y' {
+                            let mut id = vec![cx(0.0, 0.0); np * np];
+                            for q in 0..np {
+                                id[q * np + q] = cx(1.0, 0.0);
+                            }
+                            dsolve(np, &mut b, &mut id);
+                            b = id;
+                        }
+                        if deck.out == 'l' {
+                            let w = 2.0 * std::f64::consts::PI * freqs[fi];
+                            for q in 0..np {
+                                let z = b[q * np + q];
+                                out += &format!(",{:.9e},{:.9e}", z.im / w, z.im / z.re);
+                            }
+                        } else {
+                            for v in &b {
+                                out += &pair(*v);
                             }
                         }
                     }

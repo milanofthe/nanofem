@@ -132,46 +132,37 @@ fn parse_msh(path: &str) -> Mesh {
     let mut phys: HashMap<(i64, i64), String> = HashMap::new();
     let mut idmap: HashMap<i64, usize> = HashMap::new();
     let mut groups: HashMap<String, usize> = HashMap::new();
-    let ls: Vec<&str> = txt.lines().collect();
-    let mut li = 0;
-    fn next<'a>(ls: &[&'a str], li: &mut usize) -> &'a str {
-        if *li >= ls.len() {
-            die("mesh file ends inside a section");
-        }
-        *li += 1;
-        ls[*li - 1]
+    fn nx<'a>(it: &mut std::str::Lines<'a>) -> &'a str {
+        it.next().unwrap_or_else(|| die("mesh file ends inside a section"))
     }
-    let count = |li: &mut usize| -> usize {
-        next(&ls, li).trim().parse().unwrap_or_else(|_| die("bad section count"))
-    };
-    while li < ls.len() {
-        let l = next(&ls, &mut li).trim().to_string();
-        match l.as_str() {
+    fn cnt(it: &mut std::str::Lines) -> usize {
+        nx(it).trim().parse().unwrap_or_else(|_| die("bad section count"))
+    }
+    let mut it = txt.lines();
+    while let Some(head) = it.next() {
+        match head.trim() {
             "$MeshFormat" => {
-                if !next(&ls, &mut li).trim_start().starts_with("2.2") {
+                if !nx(&mut it).trim_start().starts_with("2.2") {
                     die("mesh must be Gmsh ASCII v2.2 (export with -format msh22)");
                 }
             }
             "$PhysicalNames" => {
-                for _ in 0..count(&mut li) {
-                    let l = next(&ls, &mut li).to_string();
-                    let t: Vec<&str> = l.split_whitespace().collect();
+                for _ in 0..cnt(&mut it) {
+                    let t: Vec<&str> = nx(&mut it).split_whitespace().collect();
                     let (dim, id): (i64, i64) = (t[0].parse().unwrap_or(-1), t[1].parse().unwrap_or(-1));
                     phys.insert((dim, id), t[2..].join(" ").trim_matches('"').to_string());
                 }
             }
             "$Nodes" => {
-                for _ in 0..count(&mut li) {
-                    let l = next(&ls, &mut li).to_string();
-                    let t: Vec<f64> = l.split_whitespace().map(|s| s.parse().unwrap_or(f64::NAN)).collect();
+                for _ in 0..cnt(&mut it) {
+                    let t: Vec<f64> = nx(&mut it).split_whitespace().map(|s| s.parse().unwrap_or(f64::NAN)).collect();
                     idmap.insert(t[0] as i64, m.nodes.len());
                     m.nodes.push([t[1], t[2], t[3]]);
                 }
             }
             "$Elements" => {
-                for _ in 0..count(&mut li) {
-                    let l = next(&ls, &mut li).to_string();
-                    let t: Vec<i64> = l.split_whitespace().map(|s| s.parse().unwrap_or(-1)).collect();
+                for _ in 0..cnt(&mut it) {
+                    let t: Vec<i64> = nx(&mut it).split_whitespace().map(|s| s.parse().unwrap_or(-1)).collect();
                     let (typ, ntag) = (t[1], t[2] as usize);
                     let dim = match typ {
                         2 => 2,

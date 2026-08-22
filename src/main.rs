@@ -83,7 +83,6 @@ impl Cx {
 
 type V3 = [f64; 3];
 
-fn add3(a: V3, b: V3) -> V3 { [a[0] + b[0], a[1] + b[1], a[2] + b[2]] }
 fn sub3(a: V3, b: V3) -> V3 { [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }
 fn dot3(a: V3, b: V3) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
 fn cross3(a: V3, b: V3) -> V3 {
@@ -107,43 +106,11 @@ fn tetgrad(p: [V3; 4]) -> ([V3; 4], f64) {
     ([sub3(sub3(sub3([0.0; 3], g[0]), g[1]), g[2]), g[0], g[1], g[2]], det.abs() / 6.0)
 }
 
-// -------------------------------------------------------------- quadrature
-
-// Fully symmetric rules on the reference simplex, in barycentric
-// coordinates, with weights summing to one. The tetrahedron rule is exact
-// to degree 5 and the triangle rule to degree 4, which covers the mass
-// matrices of both element orders.
-fn qtet() -> Vec<(f64, [f64; 4])> {
-    let mut q = vec![];
-    for (w, a) in [(0.0734930431163619, 0.0927352503108912), (0.1126879257180162, 0.3108859192633005)] {
-        for k in 0..4 {
-            let mut p = [a; 4];
-            p[k] = 1.0 - 3.0 * a;
-            q.push((w, p));
-        }
-    }
-    let (w, a) = (0.0425460207770812, 0.0455037041256497);
-    for i in 0..3 {
-        for j in i + 1..4 {
-            let mut p = [0.5 - a; 4];
-            p[i] = a;
-            p[j] = a;
-            q.push((w, p));
-        }
-    }
-    q
-}
-
-fn qtri() -> Vec<(f64, [f64; 3])> {
-    let mut q = vec![];
-    for (w, a) in [(0.223381589678011, 0.445948490915965), (0.109951743655322, 0.091576213509771)] {
-        for k in 0..3 {
-            let mut p = [a; 3];
-            p[k] = 1.0 - 2.0 * a;
-            q.push((w, p));
-        }
-    }
-    q
+// Mass matrix entry of two Whitney functions W_ab = l_a grad l_b - l_b grad
+// l_a, given the gradients and the integrals I(p,q) of l_p l_q over the
+// element. The same expression serves the tetrahedron and the face.
+fn wmass(g: &[V3], (a, b): (usize, usize), (c, d): (usize, usize), dot: &dyn Fn(V3, V3) -> Cx, i: &dyn Fn(usize, usize) -> f64) -> Cx {
+    dot(g[b], g[d]).rs(i(a, c)) - dot(g[b], g[c]).rs(i(a, d)) - dot(g[a], g[d]).rs(i(b, c)) + dot(g[a], g[c]).rs(i(b, d))
 }
 
 // ---------------------------------------------------------------- mesh
@@ -217,21 +184,19 @@ fn parse_msh(path: &str) -> Mesh {
                         m.names.push(name);
                         m.names.len() - 1
                     });
-                    let nd: Vec<usize> = t[3 + ntag..]
+                    let mut nd: Vec<usize> = t[3 + ntag..]
                         .iter()
                         .map(|id| *idmap.get(id).unwrap_or_else(|| die("element references unknown node")))
                         .collect();
-                    // vertices ascending: local edges and faces then follow
-                    // the global numbering, which fixes the orientation of
-                    // every basis function without a sign convention
+                    // vertices ascending: every local edge then runs from
+                    // the lower to the higher global node, so the Whitney
+                    // functions of neighboring elements agree by
+                    // construction and no orientation signs are needed
+                    nd.sort();
                     if dim == 2 {
-                        let mut k = [nd[0], nd[1], nd[2]];
-                        k.sort();
-                        m.tris.push((k, gi));
+                        m.tris.push(([nd[0], nd[1], nd[2]], gi));
                     } else {
-                        let mut k = [nd[0], nd[1], nd[2], nd[3]];
-                        k.sort();
-                        m.tets.push((k, gi));
+                        m.tets.push(([nd[0], nd[1], nd[2], nd[3]], gi));
                     }
                 }
             }
@@ -255,7 +220,6 @@ fn parse_msh(path: &str) -> Mesh {
 //   port <n> <group> <jx> <jy> <jz> <z0> (n counting from 1, j = voltage direction)
 //   sweep lin <f0> <f1> <npoints>
 //   field <path.vtk> <f>                 (E field snapshot, port 1 driven)
-//   order <1|2>                          (element order, default 1)
 struct Mat {
     eps: f64,
     tand: f64,
@@ -279,7 +243,6 @@ struct Deck {
     f1: f64,
     nf: usize,
     field: Option<(String, f64)>,
-    order: usize,
 }
 
 fn num(s: &str) -> f64 {
@@ -288,7 +251,7 @@ fn num(s: &str) -> f64 {
 
 fn parse_deck(path: &str) -> Deck {
     let txt = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("cannot read {}: {}", path, e)));
-    let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0, field: None, order: 1 };
+    let mut d = Deck { mesh: String::new(), mats: vec![], pmls: vec![], pec: vec![], abc: vec![], ports: vec![], f0: 0.0, f1: 0.0, nf: 0, field: None };
     let rel = |p: &str| -> String {
         let base = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new(""));
         base.join(p).to_string_lossy().into_owned()
@@ -302,12 +265,6 @@ fn parse_deck(path: &str) -> Deck {
         match t[0].to_lowercase().as_str() {
             "mesh" if t.len() == 2 => d.mesh = rel(t[1]),
             "field" if t.len() == 3 => d.field = Some((rel(t[1]), num(t[2]))),
-            "order" if t.len() == 2 => {
-                d.order = num(t[1]) as usize;
-                if d.order < 1 || d.order > 2 {
-                    die("order must be 1 or 2");
-                }
-            }
             "mat" if t.len() >= 4 => {
                 let mut mt = Mat { eps: 1.0, tand: 0.0, mur: 1.0 };
                 for kv in t[2..].chunks(2) {
@@ -530,71 +487,16 @@ fn ldsolve(n: usize, sym: &Sym, w: &Work, b: &mut [Cx]) {
     }
 }
 
-// ------------------------------------------------------------------ basis
+// ---------------------------------------------------------------- fem
 
 const TE: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 const SE: [(usize, usize); 3] = [(0, 1), (0, 2), (1, 2)];
-const TF: [[usize; 3]; 4] = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]];
-// largest local basis size, reached by the second order tetrahedron
-const NB: usize = 20;
-
-// Value and curl of the local H(curl) basis of a tetrahedron at the point
-// with barycentric coordinates l, given the gradients g of those
-// coordinates. Order 1 is the six Whitney edge functions
-// W_ab = l_a grad l_b - l_b grad l_a, whose curl 2 grad l_a x grad l_b is
-// constant over the element. Order 2 appends the six curl free edge
-// gradients grad(l_a l_b) and then, per face abc, the pair l_a W_bc and
-// l_b W_ca; the third such product is minus their sum, so two are
-// independent. Element vertices arrive in ascending global order, so every
-// function is pinned by the global numbering and no signs are needed.
-fn tbasis(order: usize, g: &[V3; 4], l: [f64; 4], out: &mut Vec<(V3, V3)>) {
-    let w = |a: usize, b: usize| sub3(sc3(g[b], l[a]), sc3(g[a], l[b]));
-    let cw = |a: usize, b: usize| sc3(cross3(g[a], g[b]), 2.0);
-    out.clear();
-    for (a, b) in TE {
-        out.push((w(a, b), cw(a, b)));
-    }
-    if order < 2 {
-        return;
-    }
-    for (a, b) in TE {
-        out.push((add3(sc3(g[b], l[a]), sc3(g[a], l[b])), [0.0; 3]));
-    }
-    for f in TF {
-        for (x, y, z) in [(f[0], f[1], f[2]), (f[1], f[2], f[0])] {
-            // curl(l_x W_yz) = grad l_x x W_yz + l_x curl W_yz
-            out.push((sc3(w(y, z), l[x]), add3(cross3(g[x], w(y, z)), sc3(cw(y, z), l[x]))));
-        }
-    }
-}
-
-// The same basis restricted to a boundary triangle, where only the value
-// matters. g holds the gradients of the surface barycentric coordinates,
-// whose tangential parts equal those of the volume gradients.
-fn sbasis(order: usize, g: &[V3; 3], l: [f64; 3], out: &mut Vec<V3>) {
-    let w = |a: usize, b: usize| sub3(sc3(g[b], l[a]), sc3(g[a], l[b]));
-    out.clear();
-    for (a, b) in SE {
-        out.push(w(a, b));
-    }
-    if order < 2 {
-        return;
-    }
-    for (a, b) in SE {
-        out.push(add3(sc3(g[b], l[a]), sc3(g[a], l[b])));
-    }
-    for (x, y, z) in [(0, 1, 2), (1, 2, 0)] {
-        out.push(sc3(w(y, z), l[x]));
-    }
-}
-
-// ---------------------------------------------------------------- fem
 
 struct PortDat {
     z0: f64,
     w: f64,
-    h: f64,
-    area: f64,
+    // sheet impedance relative to eta0, the weight of the port face matrix
+    zs: f64,
     // dof -> integral of (dir . whitney) over the port face, oriented
     exc: HashMap<usize, f64>,
 }
@@ -621,190 +523,131 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     // L_k = s_x s_y s_z / s_k^2, which keeps the wave impedance matched
     // while fields decay along the stretched axes.
     struct Mg {
-        epsc: Cx,
-        mur: f64,
         wm: [Cx; 3], // mass weight, the eps tensor
         ws: [Cx; 3], // stiffness weight, the 1/mu tensor
+        abc: Cx,     // sqrt(eps/mu) of the region, the absorbing weight
     }
     let one = cx(1.0, 0.0);
-    let mut matg: Vec<Mg> = (0..ng).map(|_| Mg { epsc: one, mur: 1.0, wm: [one; 3], ws: [one; 3] }).collect();
+    let (mut eps, mut mur, mut stretch) = (vec![one; ng], vec![1.0; ng], vec![[0.0; 3]; ng]);
     for (name, mt) in &deck.mats {
-        let g = &mut matg[gidx(name)];
-        g.epsc = cx(mt.eps, -mt.eps * mt.tand);
-        g.mur = mt.mur;
+        let g = gidx(name);
+        eps[g] = cx(mt.eps, -mt.eps * mt.tand);
+        mur[g] = mt.mur;
     }
-    let mut stretch = vec![[0.0; 3]; ng];
     for (name, a) in &deck.pmls {
         stretch[gidx(name)] = *a;
     }
-    for g in 0..ng {
-        let s = [cx(1.0, -stretch[g][0]), cx(1.0, -stretch[g][1]), cx(1.0, -stretch[g][2])];
-        let prod = s[0] * s[1] * s[2];
-        for k in 0..3 {
-            let lam = prod / (s[k] * s[k]);
-            matg[g].wm[k] = matg[g].epsc * lam;
-            matg[g].ws[k] = (one / lam).rs(1.0 / matg[g].mur);
-        }
-    }
-    // global edges, oriented low node -> high node
+    let matg: Vec<Mg> = (0..ng)
+        .map(|g| {
+            let s = [cx(1.0, -stretch[g][0]), cx(1.0, -stretch[g][1]), cx(1.0, -stretch[g][2])];
+            let prod = s[0] * s[1] * s[2];
+            let lam = |k: usize| prod / (s[k] * s[k]);
+            Mg {
+                wm: [eps[g] * lam(0), eps[g] * lam(1), eps[g] * lam(2)],
+                ws: [(one / lam(0)).rs(1.0 / mur[g]), (one / lam(1)).rs(1.0 / mur[g]), (one / lam(2)).rs(1.0 / mur[g])],
+                abc: (eps[g].rs(1.0 / mur[g])).sqrt(),
+            }
+        })
+        .collect();
+    // global edges; element vertices are sorted, so a local edge (a, b)
+    // always has a < b and needs no orientation sign
     let mut emap: HashMap<(u32, u32), u32> = HashMap::new();
-    let mut enodes: Vec<(u32, u32)> = vec![];
     for (t, _) in &mesh.tets {
         for (a, b) in TE {
-            let k = (t[a].min(t[b]) as u32, t[a].max(t[b]) as u32);
-            if !emap.contains_key(&k) {
-                emap.insert(k, enodes.len() as u32);
-                enodes.push(k);
-            }
+            let n = emap.len() as u32;
+            emap.entry((t[a] as u32, t[b] as u32)).or_insert(n);
         }
     }
     let ne = emap.len();
     let edge = |a: usize, b: usize| -> usize {
-        match emap.get(&(a.min(b) as u32, a.max(b) as u32)) {
+        match emap.get(&(a as u32, b as u32)) {
             Some(&e) => e as usize,
             None => die("boundary triangle does not match the volume mesh"),
         }
     };
-    // global faces, numbered for the order 2 face unknowns and carrying one
-    // adjacent tetrahedron for the abc material weight
-    let mut fmap: HashMap<[u32; 3], (usize, usize)> = HashMap::new();
-    let mut fnodes: Vec<[u32; 3]> = vec![];
-    for (ti, (t, _)) in mesh.tets.iter().enumerate() {
-        for f in TF {
-            let k = [t[f[0]] as u32, t[f[1]] as u32, t[f[2]] as u32];
-            let n = fnodes.len();
-            let e = fmap.entry(k).or_insert_with(|| {
-                fnodes.push(k);
-                (n, ti)
-            });
-            e.1 = ti;
-        }
-    }
-    let face = |t: &[usize]| -> usize {
-        match fmap.get(&[t[0] as u32, t[1] as u32, t[2] as u32]) {
-            Some(&(f, _)) => f,
-            None => die("boundary triangle does not match the volume mesh"),
-        }
-    };
-    // Unknowns sit in slots: p per edge, then nfd per face. usize::MAX
-    // marks a slot eliminated by a pec boundary, the rest are numbered.
-    let (p, nf) = (deck.order, fnodes.len());
-    let nfd = 2 * (p - 1);
-    let eslot = |e: usize, k: usize| e * p + k;
-    let fslot = |f: usize, k: usize| ne * p + f * nfd + k;
-    let mut dof = vec![0usize; ne * p + nf * nfd];
+    // PEC: eliminate all edges of pec triangles. dof carries the numbering
+    // of the remaining unknowns, usize::MAX marks a constrained edge.
+    let mut dof = vec![0usize; ne];
     for (t, g) in &mesh.tris {
         if role[*g] == 1 {
             for (a, b) in SE {
-                for k in 0..p {
-                    dof[eslot(edge(t[a], t[b]), k)] = usize::MAX;
-                }
-            }
-            for k in 0..nfd {
-                dof[fslot(face(t), k)] = usize::MAX;
+                dof[edge(t[a], t[b])] = usize::MAX;
             }
         }
     }
     let mut ndof = 0;
-    for s in dof.iter_mut() {
-        if *s != usize::MAX {
-            *s = ndof;
+    for e in 0..ne {
+        if dof[e] != usize::MAX {
+            dof[e] = ndof;
             ndof += 1;
         }
     }
-    // Local unknowns of an element, in the order tbasis and sbasis produce
-    // their functions: edge whitney, edge gradients, then the face pairs.
-    let tdofs = |t: &[usize; 4]| -> [usize; NB] {
-        let mut ld = [usize::MAX; NB];
-        for i in 0..6 {
-            let e = edge(t[TE[i].0], t[TE[i].1]);
-            for k in 0..p {
-                ld[i + 6 * k] = dof[eslot(e, k)];
-            }
+    let free = |e: usize| dof[e] != usize::MAX;
+    // boundary face -> adjacent tet, for the abc material weight
+    let mut fmap: HashMap<[u32; 3], usize> = HashMap::new();
+    for (ti, (t, _)) in mesh.tets.iter().enumerate() {
+        for f in [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]] {
+            let mut k = [t[f[0]] as u32, t[f[1]] as u32, t[f[2]] as u32];
+            k.sort();
+            fmap.insert(k, ti);
         }
-        for (j, f) in TF.iter().enumerate() {
-            for k in 0..nfd {
-                ld[12 + 2 * j + k] = dof[fslot(face(&[t[f[0]], t[f[1]], t[f[2]]]), k)];
-            }
-        }
-        ld
-    };
-    let sdofs = |t: &[usize; 3]| -> [usize; NB] {
-        let mut ld = [usize::MAX; NB];
-        for i in 0..3 {
-            let e = edge(t[SE[i].0], t[SE[i].1]);
-            for k in 0..p {
-                ld[i + 3 * k] = dof[eslot(e, k)];
-            }
-        }
-        for k in 0..nfd {
-            ld[6 + k] = dof[fslot(face(t), k)];
-        }
-        ld
-    };
-    // port geometry: total area, extent h along dir, then width w = area / h
-    let mut ports: Vec<PortDat> = deck
-        .ports
-        .iter()
-        .map(|pd| PortDat { z0: pd.z0, w: 0.0, h: 0.0, area: 0.0, exc: HashMap::new() })
-        .collect();
-    let mut ext = vec![(f64::MAX, f64::MIN); ports.len()];
+    }
+    // Port geometry: the sheet is a rectangle of height h along dir and
+    // width w, so its area gives w once h is known. Only w survives: the
+    // sheet impedance is z0 w / h and the port voltage is the mean field
+    // along dir times h, that is the surface integral divided by w.
+    let mut ports: Vec<PortDat> =
+        deck.ports.iter().map(|pd| PortDat { z0: pd.z0, w: 0.0, zs: 0.0, exc: HashMap::new() }).collect();
+    let mut geo = vec![(0.0, f64::MAX, f64::MIN); ports.len()];
     for (t, g) in &mesh.tris {
         if let Some(&p) = pmap.get(g) {
-            let (q0, q1, q2) = (mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]]);
-            let n = cross3(sub3(q1, q0), sub3(q2, q0));
-            ports[p].area += 0.5 * dot3(n, n).sqrt();
-            for n in t {
-                let x = dot3(mesh.nodes[*n], deck.ports[p].dir);
-                ext[p].0 = ext[p].0.min(x);
-                ext[p].1 = ext[p].1.max(x);
+            let n = cross3(sub3(mesh.nodes[t[1]], mesh.nodes[t[0]]), sub3(mesh.nodes[t[2]], mesh.nodes[t[0]]));
+            geo[p].0 += 0.5 * dot3(n, n).sqrt();
+            for v in t {
+                let x = dot3(mesh.nodes[*v], deck.ports[p].dir);
+                geo[p].1 = geo[p].1.min(x);
+                geo[p].2 = geo[p].2.max(x);
             }
         }
     }
     for (p, pt) in ports.iter_mut().enumerate() {
-        pt.h = ext[p].1 - ext[p].0;
-        if pt.area <= 0.0 || pt.h <= 0.0 {
+        let (area, h) = (geo[p].0, geo[p].2 - geo[p].1);
+        if area <= 0.0 || h <= 0.0 {
             die(&format!("port {} has no faces or zero extent along its direction", p + 1));
         }
-        pt.w = pt.area / pt.h;
+        pt.w = area / h;
+        pt.zs = ETA0 * h / (pt.z0 * pt.w);
     }
-    // assembly: per matrix entry (upper, dof indices) keep the frequency
-    // independent parts (curl stiffness s, eps weighted mass m, boundary b)
-    // and combine per frequency as s - k0^2 m + j k0 b
-    let mut acc: HashMap<(u32, u32), (Cx, Cx, Cx)> = HashMap::new();
-    let mut add = |di: usize, dj: usize, s: Cx, m: Cx, b: Cx| {
-        let k = (di.min(dj) as u32, di.max(dj) as u32);
-        let e = acc.entry(k).or_insert((cx(0.0, 0.0), cx(0.0, 0.0), cx(0.0, 0.0)));
-        e.0 = e.0 + s;
-        e.1 = e.1 + m;
-        e.2 = e.2 + b;
+    // Assembly: each matrix entry keeps three frequency independent
+    // coefficients, one per power of k0. The curl stiffness sits at power
+    // 0, the eps weighted mass enters as -k0^2 times its value at power 2,
+    // and the boundary term as +j k0 times its value at power 1.
+    let mut acc: HashMap<(u32, u32), [Cx; 3]> = HashMap::new();
+    let mut add = |di: usize, dj: usize, pow: usize, v: Cx| {
+        let e = acc.entry((di.min(dj) as u32, di.max(dj) as u32)).or_insert([cx(0.0, 0.0); 3]);
+        e[pow] = e[pow] + v;
     };
-    let (qt, qs) = (qtet(), qtri());
-    let zero = cx(0.0, 0.0);
-    let (mut bf, mut sf) = (vec![], vec![]);
-    let (mut se, mut me) = ([[zero; NB]; NB], [[zero; NB]; NB]);
     for (t, g) in &mesh.tets {
         let (gg, vol) = tetgrad([mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]], mesh.nodes[t[3]]]);
         let mg = &matg[*g];
-        let ld = tdofs(t);
-        let nb = 6 * p + 4 * nfd;
-        for r in se.iter_mut().chain(me.iter_mut()) {
-            r.fill(zero);
+        let ii = |p: usize, q: usize| vol * if p == q { 0.1 } else { 0.05 };
+        let mut ed = [0usize; 6];
+        for i in 0..6 {
+            ed[i] = edge(t[TE[i].0], t[TE[i].1]);
         }
-        for &(w, l) in &qt {
-            tbasis(p, &gg, l, &mut bf);
-            for i in 0..nb {
-                for j in i..nb {
-                    se[i][j] = se[i][j] + cdot3(bf[i].1, bf[j].1, &mg.ws).rs(w * vol);
-                    me[i][j] = me[i][j] + cdot3(bf[i].0, bf[j].0, &mg.wm).rs(w * vol);
-                }
+        for i in 0..6 {
+            if !free(ed[i]) {
+                continue;
             }
-        }
-        for i in 0..nb {
-            for j in i..nb {
-                if ld[i] != usize::MAX && ld[j] != usize::MAX {
-                    add(ld[i], ld[j], se[i][j], me[i][j], zero);
+            for j in i..6 {
+                if !free(ed[j]) {
+                    continue;
                 }
+                let ((a, b), (c, d)) = (TE[i], TE[j]);
+                let sij = cdot3(cross3(gg[a], gg[b]), cross3(gg[c], gg[d]), &mg.ws).rs(4.0 * vol);
+                let mij = wmass(&gg, TE[i], TE[j], &|x, y| cdot3(x, y, &mg.wm), &ii);
+                add(dof[ed[i]], dof[ed[j]], 0, sij);
+                add(dof[ed[i]], dof[ed[j]], 2, mij.rs(-1.0));
             }
         }
     }
@@ -825,41 +668,36 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         let gs2 = sc3(cross3(n, u), 1.0 / n2);
         let gs = [sub3(sub3([0.0; 3], gs1), gs2), gs1, gs2];
         let wt = match port {
-            Some(&p) => cx(ETA0 * ports[p].h / (ports[p].z0 * ports[p].w), 0.0),
+            Some(&p) => cx(ports[p].zs, 0.0),
             None => {
-                let ti = fmap[&[t[0] as u32, t[1] as u32, t[2] as u32]].1;
-                let mgf = &matg[mesh.tets[ti].1];
-                (mgf.epsc.rs(1.0 / mgf.mur)).sqrt()
+                let ti = fmap[&{
+                    let mut k = [t[0] as u32, t[1] as u32, t[2] as u32];
+                    k.sort();
+                    k
+                }];
+                matg[mesh.tets[ti].1].abc
             }
         };
-        let ld = sdofs(t);
-        let nb = 3 * p + nfd;
-        for r in me.iter_mut() {
-            r.fill(zero);
+        let i2 = |p: usize, q: usize| at * if p == q { 1.0 / 6.0 } else { 1.0 / 12.0 };
+        let mut ed = [0usize; 3];
+        for i in 0..3 {
+            ed[i] = edge(t[SE[i].0], t[SE[i].1]);
         }
-        let mut ex = [0.0f64; NB];
-        for &(w, l) in &qs {
-            sbasis(p, &gs, l, &mut sf);
-            for i in 0..nb {
-                if let Some(&pt) = port {
-                    ex[i] += w * at * dot3(deck.ports[pt].dir, sf[i]);
-                }
-                for j in i..nb {
-                    me[i][j] = me[i][j] + cx(dot3(sf[i], sf[j]) * w * at, 0.0);
-                }
-            }
-        }
-        for i in 0..nb {
-            if ld[i] == usize::MAX {
+        for i in 0..3 {
+            if !free(ed[i]) {
                 continue;
             }
-            if let Some(&pt) = port {
-                *ports[pt].exc.entry(ld[i]).or_insert(0.0) += ex[i];
+            if let Some(&p) = port {
+                let (a, b) = SE[i];
+                let c = at / 3.0 * dot3(deck.ports[p].dir, sub3(gs[b], gs[a]));
+                *ports[p].exc.entry(dof[ed[i]]).or_insert(0.0) += c;
             }
-            for j in i..nb {
-                if ld[j] != usize::MAX {
-                    add(ld[i], ld[j], zero, zero, wt * me[i][j]);
+            for j in i..3 {
+                if !free(ed[j]) {
+                    continue;
                 }
+                let tij = wmass(&gs, SE[i], SE[j], &|x, y| cx(dot3(x, y), 0.0), &i2);
+                add(dof[ed[i]], dof[ed[j]], 1, (wt * tij).js(1.0));
             }
         }
     }
@@ -867,22 +705,11 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     // triangle in CSC with a fixed slot per assembled entry
     let keys: Vec<(u32, u32)> = acc.keys().copied().collect();
     let mut pts = vec![[0.0; 3]; ndof];
-    for (s, &d) in dof.iter().enumerate() {
-        if d == usize::MAX {
-            continue;
+    for (&(a, b), &e) in &emap {
+        if dof[e as usize] != usize::MAX {
+            let (pa, pb) = (mesh.nodes[a as usize], mesh.nodes[b as usize]);
+            pts[dof[e as usize]] = sc3([pa[0] + pb[0], pa[1] + pb[1], pa[2] + pb[2]], 0.5);
         }
-        // slot to its geometric location: edge midpoint or face centroid
-        pts[d] = if s < ne * p {
-            let e = enodes[s / p];
-            sc3(add3(mesh.nodes[e.0 as usize], mesh.nodes[e.1 as usize]), 0.5)
-        } else {
-            let f = fnodes[(s - ne * p) / nfd];
-            let mut c = [0.0; 3];
-            for v in f {
-                c = add3(c, mesh.nodes[v as usize]);
-            }
-            sc3(c, 1.0 / 3.0)
-        };
     }
     let perm = ndorder(ndof, &keys, &pts);
     let mut ap = vec![0usize; ndof + 1];
@@ -894,14 +721,14 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     }
     let mut nxt = ap.clone();
     let mut ai = vec![0u32; keys.len()];
-    let ents: Vec<(usize, Cx, Cx, Cx)> = acc
+    let ents: Vec<(usize, [Cx; 3])> = acc
         .iter()
-        .map(|(&(a, b), &(s, m, bb))| {
+        .map(|(&(a, b), &c)| {
             let (i, j) = (perm[a as usize].min(perm[b as usize]), perm[a as usize].max(perm[b as usize]));
             let pos = nxt[j];
             nxt[j] += 1;
             ai[pos] = i as u32;
-            (pos, s, m, bb)
+            (pos, c)
         })
         .collect();
     let sym = symbolic(ndof, &ap, &ai);
@@ -938,8 +765,8 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                 let mut w = work(ndof, sym);
                 for fi in (t..freqs.len()).step_by(nt) {
                     let k0 = 2.0 * std::f64::consts::PI * freqs[fi] / C0;
-                    for &(pos, s, m, b) in ents.iter() {
-                        ax[pos] = s + m.rs(-k0 * k0) + b.js(k0);
+                    for &(pos, c) in ents.iter() {
+                        ax[pos] = c[0] + (c[1] + c[2].rs(k0)).rs(k0);
                     }
                     numeric(ndof, ap, ai, &ax, sym, &mut w);
                     let mut smat = vec![vec![cx(0.0, 0.0); np]; np];
@@ -954,7 +781,7 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
                             for (&d, &c) in &ports[q].exc {
                                 vq = vq + rhs[perm[d]].rs(c);
                             }
-                            vq = vq.rs(-ports[q].h / ports[q].area);
+                            vq = vq.rs(-1.0 / ports[q].w);
                             smat[q][p] = vq.rs(2.0 / (ports[p].z0 * ports[q].z0).sqrt());
                             if q == p {
                                 smat[q][p] = smat[q][p] - cx(1.0, 0.0);
@@ -995,8 +822,8 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
     if let Some((path, ff)) = &deck.field {
         let k0 = 2.0 * std::f64::consts::PI * ff / C0;
         let mut ax = vec![cx(0.0, 0.0); ents.len()];
-        for &(pos, s, m, b) in &ents {
-            ax[pos] = s + m.rs(-k0 * k0) + b.js(k0);
+        for &(pos, c) in &ents {
+            ax[pos] = c[0] + (c[1] + c[2].rs(k0)).rs(k0);
         }
         let mut w = work(ndof, &sym);
         numeric(ndof, &ap, &ai, &ax, &sym, &mut w);
@@ -1006,17 +833,16 @@ fn simulate(deck: &Deck, mesh: &Mesh) {
         }
         ldsolve(ndof, &sym, &w, &mut rhs);
         let mut ef = Vec::with_capacity(mesh.tets.len());
-        let mut bf = vec![];
         for (t, _) in &mesh.tets {
             let (gg, _) = tetgrad([mesh.nodes[t[0]], mesh.nodes[t[1]], mesh.nodes[t[2]], mesh.nodes[t[3]]]);
-            tbasis(p, &gg, [0.25; 4], &mut bf);
-            let ld = tdofs(t);
             let mut e = [cx(0.0, 0.0); 3];
-            for i in 0..bf.len() {
-                if ld[i] != usize::MAX {
-                    let x = rhs[perm[ld[i]]];
+            for (a, b) in TE {
+                let ei = edge(t[a], t[b]);
+                if free(ei) {
+                    let x = rhs[perm[dof[ei]]].rs(0.25);
+                    let d = sub3(gg[b], gg[a]);
                     for k in 0..3 {
-                        e[k] = e[k] + x.rs(bf[i].0[k]);
+                        e[k] = e[k] + x.rs(d[k]);
                     }
                 }
             }

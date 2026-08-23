@@ -141,12 +141,13 @@ main & 9 & 954 \\
 \label{tab:budget}
 \end{table}
 
-The linear algebra is the largest block. That is the opposite of nanospice,
-where the parser dominated: a field solver has a trivial input format and a
-solver whose cost grows with the cube of the mesh resolution. Everything the
-budget excluded is listed with reasons in section~\ref{sec:cuts}.
+The linear algebra is the largest block, at 213 lines for the ordering and
+the factorization. The input format is small in comparison, which is the
+reverse of the distribution in nanospice. Everything the budget excluded is
+listed with reasons in section~\ref{sec:cuts}.
 
 \section{The formulation}
+\label{sec:formulation}
 \locbar{theory only}{0 lines}{0}{0}
 
 Maxwell's equations with an \(e^{+j\omega t}\) time dependence give, after
@@ -201,6 +202,39 @@ Its tangential component along its own edge is one and along the other five
 edges is zero, so the unknown attached to an edge is the line integral of
 the field along it. The curl is constant over the element.
 
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[scale=1.0, font=\footnotesize,
+  ed/.style={line width=0.5pt, ->, >=stealth, shorten >=2pt, shorten <=2pt},
+  hd/.style={line width=0.4pt, dashed, ->, >=stealth, shorten >=2pt, shorten <=2pt}]
+\coordinate (v0) at (0,0);
+\coordinate (v1) at (4.2,0.15);
+\coordinate (v2) at (1.15,0.95);
+\coordinate (v3) at (2.6,2.6);
+\draw[ed] (v0) -- (v1);
+\draw[hd] (v0) -- (v2);
+\draw[ed] (v0) -- (v3);
+\draw[hd] (v1) -- (v2);
+\draw[ed] (v1) -- (v3);
+\draw[hd] (v2) -- (v3);
+\foreach \i in {0,1,2,3} \fill (v\i) circle (1.6pt);
+\node[below left] at (v0) {$n_0$};
+\node[below right] at (v1) {$n_1$};
+\node[below right, inner sep=1pt] at (v2) {$n_2$};
+\node[above] at (v3) {$n_3$};
+\node[below] at ($(v0)!0.5!(v1)$) {$\mathbf{W}_{01}$};
+\node[left] at ($(v0)!0.68!(v3)$) {$\mathbf{W}_{03}$};
+\node[right] at ($(v1)!0.55!(v3)$) {$\mathbf{W}_{13}$};
+\end{tikzpicture}
+\caption{The six edge unknowns of a tetrahedron. The unknown on an edge is
+the line integral of \(\mathbf{E}\) along it. Node indices are sorted on
+input, so every arrow runs from the lower to the higher global index and two
+tetrahedra sharing an edge assign it the same direction without a sign
+convention. Dashed edges are behind the front face.}
+\label{fig:tet}
+\end{figure}
+
 \begin{derivation}{the element matrices in closed form}
 The gradients \(\nabla\lambda\) are constant over a straight tetrahedron, so
 the stiffness entry follows immediately from~\eqref{eq:whitney},
@@ -225,6 +259,48 @@ gives the face mass matrix used by every boundary condition, so one helper
 serves both.
 \end{derivation}
 
+\section{Dispersion and mesh density}
+\locbar{theory and measurement}{0 lines}{0}{0}
+
+The discrete dispersion error of an edge element of order \(p\) scales as
+\((kh)^{2p}\), so the phase a wave accumulates over a length \(L\) carries a
+relative error that grows as \(k^{2p+1}\). For the first order elements used
+here this means the phase error rises with the cube of frequency at fixed
+mesh, and the mesh must be sized by the shortest wavelength in the model.
+Table~\ref{tab:order} gives the measured error over the reference line and
+fixes the mesh density: ten cells per wavelength give a relative phase error
+near one percent, thirty give one part in fifteen hundred.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{rrr}
+\toprule
+cells per wavelength & phase error / rad & relative \\
+\midrule
+30.0 & \(1.63 \times 10^{-3}\) & \(6.48 \times 10^{-4}\) \\
+10.0 & \(4.53 \times 10^{-2}\) & \(6.00 \times 10^{-3}\) \\
+6.0 & \(2.22 \times 10^{-1}\) & \(1.77 \times 10^{-2}\) \\
+3.7 & \(1.04 \times 10^{0}\) & \(5.17 \times 10^{-2}\) \\
+\bottomrule
+\end{tabular}
+\caption{Accumulated phase error of a TEM line against its exact value
+\(-k_0 L\). The measured growth per factor three in frequency is \(27.8\),
+against \(27\) from the \(k^{3}\) law.}
+\label{tab:order}
+\end{table}
+
+\begin{fieldnote}{an under-resolved mesh shifts a resonance without failing}
+Dispersion error slows the discrete wave, which lengthens the electrical
+size of a structure and moves every resonance down. Nothing in the output
+marks this: the scattering parameters remain passive, reciprocal and smooth,
+the pivot spread and the residual stay small, and the only symptom is that
+the answer is wrong. The reference antenna in section~\ref{sec:results}
+resonates at \(2.40\) GHz on its default mesh and at \(2.48\) GHz on a mesh
+refined by a factor of two. Mesh convergence has to be established by
+running two densities, since no diagnostic in the solver can substitute for
+it.
+\end{fieldnote}
+
 \section{The mesh reader and orientation}
 \locbar{Gmsh mesh reader}{87 lines, budget 71 to 158}{71}{158}
 
@@ -240,9 +316,9 @@ three of every triangle into ascending order. Every local edge \((a,b)\)
 then satisfies \(a < b\) in global numbering, so all elements agree on the
 direction of every shared edge by construction. Assembly, the port excitation integral and the field
 export are then all sign free. One line in the reader replaces about ten
-sign carrying expressions elsewhere. Second order elements inherit the same
-property, since their face functions are pinned by the sorted vertex triple
-of each face.
+sign carrying expressions elsewhere, and a sign error in any of them cancels
+contributions instead of adding them, which changes the result without
+failing visibly.
 \end{decision}
 
 Sorting changes the sign of the Jacobian determinant, which is why the
@@ -352,11 +428,30 @@ halves recursively and the separator last. On the reference antenna this
 gives \(0.46\) million nonzeros in \(L\) against \(3.55\) million in the
 natural order, a factor of \(7.7\).
 
-\begin{fieldnote}{a smaller separator that increases fill}
-A refinement is to take the smaller of the two candidate boundary
-layers as the separator rather than always the second. Implemented and measured, it produced \(0.47\)
-million nonzeros against \(0.46\), and was removed.
-\end{fieldnote}
+\subsection{Equilibration and refinement}
+
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\footnotesize, scale=0.72]
+\foreach \x in {0,...,9} \foreach \y in {0,...,5} {
+  \pgfmathsetmacro{\isep}{ifthenelse(\x==5,1,0)}
+  \ifnum\x=5 \fill (\x,\y) circle (2.0pt);
+  \else \draw[line width=0.4pt] (\x,\y) circle (1.7pt); \fi
+}
+\draw[line width=0.5pt, dashed] (4.5,-0.7) -- (4.5,5.7);
+\node[below] at (2.0,-0.8) {$A$, ordered first};
+\node[below] at (7.5,-0.8) {$B$, ordered second};
+\node[above] at (5.0,5.8) {separator, ordered last};
+\draw[line width=0.4pt, ->, >=stealth] (5.6,5.7) -- (5.1,5.0);
+\end{tikzpicture}
+\caption{One level of the geometric nested dissection. The unknowns are
+split at the median of the longest bounding box axis. Those on the second
+side with a neighbour on the first form the separator and are numbered
+after both halves, so no fill can connect \(A\) to \(B\). Both halves are
+then split recursively down to blocks of 32.}
+\label{fig:nd}
+\end{figure}
 
 \subsection{Equilibration and refinement}
 
@@ -418,6 +513,28 @@ is then \(Z_s = z_0 w / h\), and the port contributes \(j k_0 \eta_0 / Z_s\)
 times the face mass matrix, the same expression as every other boundary
 condition.
 
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\footnotesize, scale=1.0]
+\draw[line width=0.5pt] (0,0) rectangle (3.6,1.9);
+\foreach \y in {0.25,0.55,...,1.75} \draw[line width=0.25pt] (0.15,\y) -- (3.45,\y);
+\draw[line width=0.5pt, <->, >=stealth] (-0.45,0) -- (-0.45,1.9);
+\node[left] at (-0.45,0.95) {$h$};
+\draw[line width=0.5pt, <->, >=stealth] (0,-0.4) -- (3.6,-0.4);
+\node[below] at (1.8,-0.4) {$w = A/h$};
+\draw[line width=0.7pt, ->, >=stealth] (4.15,0.1) -- (4.15,1.8);
+\node[right] at (4.15,0.95) {$\hat{u}$};
+\node at (1.8,0.95) {\colorbox{white}{$Z_s = z_0\, w/h$}};
+\end{tikzpicture}
+\caption{A lumped port. The patch of boundary triangles carries a sheet
+impedance and an impressed surface current. Its height is the extent of the
+patch along the given direction \(\hat{u}\) and its width follows from the
+total area, so the deck states only \(\hat{u}\) and the reference impedance
+\(z_0\).}
+\label{fig:port}
+\end{figure}
+
 \begin{derivation}{port voltage without the port area}
 The port voltage is the mean field along the direction \(\hat{u}\) times the
 height,
@@ -442,6 +559,7 @@ a port as a coil gives \(L = \mathrm{Im}(Z)/\omega\) and
 reports.
 
 \section{Results}
+\label{sec:results}
 
 The reference model is an edge fed microstrip patch antenna on a
 \(1.57\) mm substrate of \(\varepsilon_r = 2.2\), meshed by Gmsh into
@@ -475,9 +593,9 @@ numeric factorization & 46.5 ms & per frequency \\
 triangular solve & 1.0 ms & per frequency and port \\
 \bottomrule
 \end{tabular}
-\caption{Runtime by stage on the reference antenna. The factorization
-dominates, so the ordering was measured and the assembly was not
-optimized.}
+\caption{Runtime by stage on the reference antenna. The factorization is
+97 percent of the work per frequency, so the fill of the ordering sets the
+runtime and the assembly does not.}
 \label{tab:time}
 \end{table}
 
@@ -512,34 +630,7 @@ from the closed cavity mode.}
 \label{tab:valid}
 \end{table}
 
-\begin{fieldnote}{an orientation error that the value tests miss}
-This test is absent from table~\ref{tab:valid} because the second order code
-it used is not in the current file. The accumulated phase error of the TEM
-line was measured against its exact value \(-k_0 L\) at several
-frequencies. That error grows as \(k^{2p+1}\), so tripling the frequency
-multiplies it by about \(27\) at first order and \(243\) at second.
-Table~\ref{tab:order} gives the measurement. A wrong orientation or a
-mismatched face function still produces plausible scattering parameters, but
-changes the rate.
-\end{fieldnote}
 
-\begin{table}[H]
-\centering
-\begin{tabular}{rrr}
-\toprule
-cells per wavelength & phase error, \(p=1\) & phase error, \(p=2\) \\
-\midrule
-30.0 & \(1.63 \times 10^{-3}\) & \(5.19 \times 10^{-8}\) \\
-10.0 & \(4.53 \times 10^{-2}\) & \(1.42 \times 10^{-5}\) \\
-6.0 & \(2.22 \times 10^{-1}\) & \(2.25 \times 10^{-4}\) \\
-3.7 & \(1.04 \times 10^{0}\) & \(3.57 \times 10^{-3}\) \\
-\bottomrule
-\end{tabular}
-\caption{Accumulated phase error in radians over the reference line. The
-measured growth per factor three in frequency was \(27.8\) at first order
-and \(274\) at second, against \(27\) and \(243\) from theory.}
-\label{tab:order}
-\end{table}
 
 \section{The cut list}
 \label{sec:cuts}
@@ -550,7 +641,7 @@ and \(274\) at second, against \(27\) and \(243\) from theory.}
 \toprule
 feature & estimated lines & reason \\
 \midrule
-second order elements & 150 to 190 & built, measured, removed \\
+second order elements & 150 to 190 & five times the unknowns per mesh \\
 modal waveguide ports & 200+ & needs a 2D eigensolver \\
 supernodal factorization & 200+ & blocked kernels for the factorization \\
 moment matching sweeps & 50+ & diverges near resonances \\
@@ -562,13 +653,18 @@ deck validation & 31 & belongs to whatever writes the deck \\
 \caption{What the budget excluded.}
 \end{table}
 
-Second order elements were implemented and validated by the convergence rate
-of table~\ref{tab:order} before being removed. They carry twenty unknowns
-per tetrahedron instead of six: the six Whitney functions, six curl free
-edge gradients, and two functions per face. At six cells per wavelength they
-are three orders of magnitude more accurate than first order on the same
-mesh. They also consume the remaining budget and multiply the number of
-unknowns by five. The code is kept on a branch.
+Second order elements are the largest entry. They carry twenty unknowns per tetrahedron instead of six: the
+six Whitney functions, six curl free edge gradients, and two functions per
+face, the last pinned by the sorted vertex triple of each face and therefore
+also free of orientation handling. Their dispersion error scales as
+\((kh)^{4}\) rather than \((kh)^{2}\), which at six cells per wavelength
+is three orders of magnitude. Against that, the closed form element matrices
+of section~\ref{sec:formulation} no longer suffice, since the integrands are
+no longer constant, so a quadrature rule enters; and the unknown count rises
+by a factor of five on a given mesh, which for a direct solver raises the
+memory by more than an order of magnitude. Coarsening the mesh recovers part
+of that, but not on the same problem geometry. Accuracy per unknown improves, the ceiling on model
+size falls, and the ceiling is the binding constraint here.
 
 \section{Closing}
 
@@ -581,10 +677,10 @@ output, a geometric nested dissection ordering, a complex symmetric
 \(LDL^T\) with equilibration and iterative refinement, a parallel frequency
 sweep, and field export.
 
-Three decisions account for most of what fits. Sorting the mesh vertices
-removes orientation from the solver. Four frequency coefficients per matrix
-entry keep the assembly at one pass for an entire sweep. Storing the layer
-stretch separately from the permittivity lets conductivity reuse the mass
-entry. Each removes bookkeeping rather than compressing it.
+Three decisions reduce code outside their own section. Sorting the mesh vertices
+removes orientation handling from the solver. Four frequency coefficients
+per matrix entry hold the assembly at one pass for an entire sweep. Storing
+the layer stretch separately from the permittivity lets the conduction
+current reuse the mass entry.
 
 \end{document}

@@ -5,7 +5,8 @@ Run from the repository root after `cargo build --release`:
 
     python3 report/data/gen.py
 
-Writes cond.dat, patch.dat, field_xy.dat and field_xz.dat next to this file.
+Writes cond.dat, patch.dat and the field grids and contours next to this
+file.
 No third party packages are used.
 """
 
@@ -43,8 +44,8 @@ def conditioning():
     # the unequilibrated column is measured with equilibration disabled in the
     # solver and is kept here as recorded, since the current binary cannot
     # produce it
-    plain = ["1.0e9", "1.2e8", "1.0e7", "1.2e6", "1.0e5", "1.2e4",
-             "1.0e3", "5.0e2", "3.2e4", "1.8e5"]
+    plain = ["1.1e9", "1.2e8", "1.1e7", "1.2e6", "1.1e5", "1.2e4",
+             "1.1e3", "8.4e2", "3.4e3", "5.8e5"]
     with open(os.path.join(HERE, "cond.dat"), "w") as f:
         f.write("f cond plain\n")
         for (fr, c), p in zip(rows, plain):
@@ -81,67 +82,145 @@ def read_vtk(path):
     return cen, mag
 
 
-def grid_nn(cen, mag, axis, lo, hi, u, v, nu, nv, bounds, floor_db=-30.0):
-    """Nearest neighbour sample of |E| in dB onto a regular nu by nv grid.
+def grid_idw(cen, mag, axis, lo, hi, u, v, nu, nv, bounds, radius, floor_db):
+    """Smooth |E| in dB onto a regular grid, gaussian weighted.
 
-    The mesh is coarser than any useful raster, so averaging leaves holes.
-    Nearest neighbour gives a piecewise constant map with no gaps, which also
-    suits the stylized look of the figures. The scale is dB relative to the
-    peak of the cut, clipped at floor_db, because the fringing field above a
-    patch is two orders of magnitude below the field inside the substrate.
+    The field is piecewise constant per tetrahedron, so a raster of the raw
+    cell values is blocky at any useful resolution. Weighting all cells of
+    the slab by exp(-(d/r)^2) gives a smooth field whose support is the mesh
+    spacing. The result is in dB relative to the peak of the cut, since the
+    fringing field above a patch is two orders of magnitude below the field
+    inside the substrate.
     """
     u0, u1, v0, v1 = bounds
     pts = [(c[u], c[v], m) for c, m in zip(cen, mag) if lo <= c[axis] <= hi]
     if not pts:
         sys.exit("empty slab")
-    peak = max(m for _, _, m in pts) or 1.0
     out = []
     for r in range(nv):
-        y = v0 + (v1 - v0) * (r + 0.5) / nv
+        y = v0 + (v1 - v0) * r / (nv - 1)
         row = []
         for k in range(nu):
-            x = u0 + (u1 - u0) * (k + 0.5) / nu
-            best, bd = 0.0, float("inf")
+            x = u0 + (u1 - u0) * k / (nu - 1)
+            num = den = 0.0
             for cu, cv, m in pts:
-                d = (cu - x) ** 2 + (cv - y) ** 2
-                if d < bd:
-                    bd, best = d, m
-            db = 20.0 * math.log10(max(best / peak, 10 ** (floor_db / 20.0)))
-            row.append(max(db, floor_db))
+                w = math.exp(-(((cu - x) ** 2 + (cv - y) ** 2) / (radius * radius)))
+                num += w * m
+                den += w
+            row.append(num / den if den > 0 else 0.0)
         out.append(row)
-    return out
+    peak = max(max(r) for r in out) or 1.0
+    lin = 10 ** (floor_db / 20.0)
+    return [[max(20.0 * math.log10(max(m / peak, lin)), floor_db) for m in r] for r in out]
 
 
-def write_grid(name, acc, bounds, nu, nv, scale, floor_db=-30.0):
+def contours(acc, bounds, nu, nv, scale, levels):
+    """Marching squares on the normalized grid, as polyline segments."""
+    u0, u1, v0, v1 = bounds
+    segs = []
+    for lv in levels:
+        for r in range(nv - 1):
+            for k in range(nu - 1):
+                cs = [acc[r][k], acc[r][k + 1], acc[r + 1][k + 1], acc[r + 1][k]]
+                xs = [u0 + (u1 - u0) * (k + dx) / (nu - 1) for dx in (0, 1, 1, 0)]
+                ys = [v0 + (v1 - v0) * (r + dy) / (nv - 1) for dy in (0, 0, 1, 1)]
+                hit = []
+                for e in range(4):
+                    a, b = e, (e + 1) % 4
+                    if (cs[a] - lv) * (cs[b] - lv) < 0:
+                        t = (lv - cs[a]) / (cs[b] - cs[a])
+                        hit.append((xs[a] + t * (xs[b] - xs[a]), ys[a] + t * (ys[b] - ys[a])))
+                if len(hit) == 2:
+                    segs.append((hit[0], hit[1]))
+    return [((a[0] * scale, a[1] * scale), (b[0] * scale, b[1] * scale)) for a, b in segs]
+
+
+def write_grid(name, acc, bounds, nu, nv, scale, floor_db):
     u0, u1, v0, v1 = bounds
     with open(os.path.join(HERE, name), "w") as f:
         f.write("x y e\n")
         for r in range(nv):
             for k in range(nu):
-                x = (u0 + (u1 - u0) * (k + 0.5) / nu) * scale
-                y = (v0 + (v1 - v0) * (r + 0.5) / nv) * scale
+                x = (u0 + (u1 - u0) * k / (nu - 1)) * scale
+                y = (v0 + (v1 - v0) * r / (nv - 1)) * scale
                 f.write("%.4f %.4f %.4f\n" % (x, y, (acc[r][k] - floor_db) / (-floor_db)))
             f.write("\n")
+
+
+def write_contours(name, segs):
+    with open(os.path.join(HERE, name), "w") as f:
+        f.write("x y\n")
+        for a, b in segs:
+            f.write("%.4f %.4f\n%.4f %.4f\n\n" % (a[0], a[1], b[0], b[1]))
+
+
+def mesh_cut(plane=0.045, axis=0, u=1, v=2, name="mesh_cut.dat"):
+    """Intersection of the tetrahedral mesh with a plane, as polygons.
+
+    Each tetrahedron crossing the plane is cut into a triangle or a
+    quadrilateral. The polygon vertices are ordered by angle about their
+    centroid, which is enough for a convex cross section.
+    """
+    ls = open(MESH).read().splitlines()
+    i = ls.index("$Nodes")
+    n = int(ls[i + 1])
+    pos = {}
+    for k in range(n):
+        t = ls[i + 2 + k].split()
+        pos[int(t[0])] = (float(t[1]), float(t[2]), float(t[3]))
+    i = ls.index("$Elements")
+    tets = []
+    for k in range(int(ls[i + 1])):
+        t = ls[i + 2 + k].split()
+        if t[1] == "4":
+            nt = int(t[2])
+            tets.append([int(x) for x in t[3 + nt:]])
+    ED = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+    polys = []
+    for tet in tets:
+        pts = []
+        for a, b in ED:
+            pa, pb = pos[tet[a]], pos[tet[b]]
+            da, db = pa[axis] - plane, pb[axis] - plane
+            if da * db < 0:
+                w = da / (da - db)
+                pts.append((pa[u] + w * (pb[u] - pa[u]), pa[v] + w * (pb[v] - pa[v])))
+        if len(pts) < 3:
+            continue
+        cx = sum(q[0] for q in pts) / len(pts)
+        cy = sum(q[1] for q in pts) / len(pts)
+        pts.sort(key=lambda q: math.atan2(q[1] - cy, q[0] - cx))
+        polys.append(pts)
+    with open(os.path.join(HERE, name), "w") as f:
+        f.write("x y\n")
+        for q in polys:
+            for a in q + [q[0]]:
+                f.write("%.4f %.4f\n" % (a[0] * 1000.0, a[1] * 1000.0))
+            f.write("\n")
+    return len(polys)
 
 
 def fields():
     """Two cuts of |E| through the antenna at its resonance."""
     vtk = os.path.join(HERE, "_field.vtk")
-    run("mesh %s\n%ssweep lin 2.4e9 2.4e9 1\nfield %s 2.4e9\n" % (MESH, SUB, vtk))
+    run("mesh %s\n%ssweep lin 2.45e9 2.45e9 1\nfield %s 2.45e9\n" % (MESH, SUB, vtk))
     cen, mag = read_vtk(vtk)
     os.remove(vtk)
     h = 0.00157
-    # inside the substrate, looking down on the patch, cropped to the region
-    # that carries field
-    bx = (0.012, 0.078, 0.022, 0.078)
-    acc = grid_nn(cen, mag, 2, 0.0, h, 0, 1, 44, 38, bx, -20.0)
-    write_grid("field_xy.dat", acc, bx, 44, 38, 1000.0, -20.0)
+    lv = [0.35, 0.55, 0.75, 0.9]
+    # inside the substrate, looking down on the patch
+    bx, nu, nv = (0.012, 0.078, 0.022, 0.078), 90, 78
+    acc = grid_idw(cen, mag, 2, 0.0, h, 0, 1, nu, nv, bx, 0.005, -20.0)
+    write_grid("field_xy.dat", acc, bx, nu, nv, 1000.0, -20.0)
+    nrm = [[(m + 20.0) / 20.0 for m in r] for r in acc]
+    write_contours("cont_xy.dat", contours(nrm, bx, nu, nv, 1000.0, lv))
     # vertical cut along the resonant direction, through the middle of the
-    # patch: shows the half wave in the substrate and the fringing over both
-    # radiating edges
-    bz = (0.022, 0.078, 0.0, 0.006)
-    acc = grid_nn(cen, mag, 0, 0.040, 0.050, 1, 2, 44, 16, bz, -25.0)
-    write_grid("field_xz.dat", acc, bz, 44, 16, 1000.0, -25.0)
+    # patch: the half wave in the substrate and the fringing over both edges
+    bz, nu, nv = (0.022, 0.078, 0.0, 0.008), 90, 40
+    acc = grid_idw(cen, mag, 0, 0.038, 0.052, 1, 2, nu, nv, bz, 0.0035, -25.0)
+    write_grid("field_xz.dat", acc, bz, nu, nv, 1000.0, -25.0)
+    nrm = [[(m + 25.0) / 25.0 for m in r] for r in acc]
+    write_contours("cont_xz.dat", contours(nrm, bz, nu, nv, 1000.0, lv))
 
 
 if __name__ == "__main__":
@@ -150,4 +229,5 @@ if __name__ == "__main__":
     conditioning()
     sweep()
     fields()
-    print("wrote cond.dat, patch.dat, field_xy.dat, field_xz.dat")
+    print(mesh_cut(), 'mesh polygons')
+    print("wrote cond.dat, patch.dat, field and contour grids")

@@ -39,6 +39,22 @@ Physical Surface("pec") = {patch(), gnd()};
 Physical Surface("feed") = {feed()};
 Physical Surface("open") = {top(), xm(), xp(), ym(), yp()};
 
-Mesh.MeshSizeMax = 12;
-Characteristic Length{ PointsOf{ Surface{patch(), feed()}; } } = 5;
+// Grade the element size with distance from the metal: fine on the patch
+// and the feed, growing smoothly into the air box. Without this the mesh
+// jumps from the substrate thickness straight to the maximum size and
+// produces slivers.
+Field[1] = Distance;
+Field[1].SurfacesList = {patch(), feed()};
+Field[1].Sampling = 80;
+Field[2] = Threshold;
+Field[2].InField = 1;
+Field[2].SizeMin = 3.0;
+Field[2].SizeMax = 11.0;
+Field[2].DistMin = 3.0;
+Field[2].DistMax = 28.0;
+Background Field = 2;
+Mesh.MeshSizeExtendFromBoundary = 0;
+Mesh.MeshSizeFromPoints = 0;
+Mesh.MeshSizeFromCurvature = 0;
+Mesh.Optimize = 1;
 Mesh.ScalingFactor = 0.001;

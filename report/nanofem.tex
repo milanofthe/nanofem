@@ -311,8 +311,8 @@ size of a structure and moves every resonance down. Nothing in the output
 marks this: the scattering parameters remain passive, reciprocal and smooth,
 the pivot spread and the residual stay small, and the only symptom is that
 the answer is wrong. The reference antenna in section~\ref{sec:results}
-resonates at \(2.40\) GHz on its default mesh and at \(2.48\) GHz on a mesh
-refined by a factor of two. Mesh convergence has to be established by
+resonates at \(2.45\) GHz on its default mesh and at \(2.50\) GHz on a mesh
+refined by a factor of one and a half. Mesh convergence has to be established by
 running two densities, since no diagnostic in the solver can substitute for
 it.
 \end{fieldnote}
@@ -441,8 +441,8 @@ Fill is controlled by a geometric nested dissection ordering: split the
 unknowns at the median of the longest bounding box axis, take as separator
 those vertices of the second half with a neighbour in the first, order both
 halves recursively and the separator last. On the reference antenna this
-gives \(0.46\) million nonzeros in \(L\) against \(3.55\) million in the
-natural order, a factor of \(7.7\).
+gives \(1.72\) million nonzeros in \(L\) against \(17.2\) million in the
+natural order, a factor of ten.
 
 \subsection{Equilibration and refinement}
 
@@ -496,8 +496,8 @@ produces for free and which bounds the condition number from below.
 \(1/f^2\) branch on the left is the low frequency breakdown of the
 curl-curl operator, which loses the mass term that regularizes its
 nullspace. The rise on the right sets in once the mesh becomes coarse
-against the wavelength. Equilibration gains a factor of about six below
-\(1\) GHz and loses about a factor of three between \(1\) and \(5\) GHz.}
+against the wavelength. Equilibration gains a factor of about \(2.5\) over
+the whole low frequency branch and is neutral in the operating band.}
 \label{fig:cond}
 \end{figure}
 
@@ -579,7 +579,28 @@ reports.
 
 The reference model is an edge fed microstrip patch antenna on a
 \(1.57\) mm substrate of \(\varepsilon_r = 2.2\), meshed by Gmsh into
-\(3760\) tetrahedra and \(4215\) unknowns.
+\(9418\) tetrahedra and \(9847\) unknowns.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\footnotesize]
+\begin{axis}[bwaxis, grid=none, width=0.92\textwidth, height=0.40\textwidth,
+  xlabel={$y$ / mm}, ylabel={$z$ / mm}, enlargelimits=0.02,
+  xmin=0, xmax=100, ymin=0, ymax=35]
+\addplot[black, line width=0.2pt] table[x=x, y=y] {data/mesh_cut.dat};
+\addplot[black, line width=1.1pt] coordinates {(31.6,1.57) (68.4,1.57)};
+\end{axis}
+\end{tikzpicture}
+\caption{The tetrahedral mesh cut by the plane \(x = 45\) mm, the same plane
+as the right hand field map. The substrate is the flat layer of elements
+below \(z = 1.57\) mm and the patch is the heavy line on top of it. The
+element size is set by a distance field on the patch and the feed, growing
+from \(3\) mm at the metal to \(11\) mm at the far corners of the air box,
+so the aspect ratio stays bounded through the transition out of the
+substrate. A uniform maximum size instead produces slivers spanning the air
+region and moves the resonance by two percent.}
+\label{fig:mesh}
+\end{figure}
 
 \begin{figure}[H]
 \centering
@@ -590,8 +611,8 @@ The reference model is an edge fed microstrip patch antenna on a
 \end{axis}
 \end{tikzpicture}
 \caption{Reflection of the reference antenna. The resonance appears as a dip
-near \(2.4\) GHz on this mesh. It is not converged: refining the mesh moves
-it to \(2.48\) GHz, and part of the remaining drift is the first order
+at \(2.45\) GHz on this mesh. It is not converged: refining the mesh moves
+it to \(2.50\) GHz, and part of the remaining drift is the first order
 absorbing boundary, which sits about a third of a wavelength above the
 patch.}
 \label{fig:patch}
@@ -601,41 +622,37 @@ patch.}
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[font=\footnotesize, baseline]
-\begin{axis}[bwaxis, grid=none, width=0.44\textwidth, height=0.40\textwidth,
-  xlabel={$x$ / mm}, ylabel={$y$ / mm},
+\begin{axis}[bwaxis, grid=none, width=0.45\textwidth, height=0.42\textwidth,
+  view={0}{90}, xlabel={$x$ / mm}, ylabel={$y$ / mm},
   title={\footnotesize substrate, $z = h/2$, floor $-20$ dB},
-  enlargelimits=false, axis on top, point meta min=0, point meta max=1,
-  colormap={grays}{gray(0cm)=(1); gray(1cm)=(0.86); gray(2cm)=(0.70); gray(3cm)=(0.52); gray(4cm)=(0.30); gray(5cm)=(0.08)},
-  colormap access=piecewise constant,]
-\addplot[matrix plot*, point meta=explicit, mesh/cols=44]
-  table[x=x, y=y, meta=e] {data/field_xy.dat};
-\draw[line width=0.7pt] (axis cs:20.8,31.6) rectangle (axis cs:69.2,68.4);
-\draw[line width=1.1pt] (axis cs:43,31.6) -- (axis cs:47,31.6);
+  enlargelimits=false, axis on top, colormap={gray}{gray(0cm)=(1); gray(1cm)=(0.05)},]
+\addplot3[surf, shader=interp, mesh/cols=90] table[x=x, y=y, z=e] {data/field_xy.dat};
+\addplot3[black, line width=0.25pt] table[x=x, y=y, z expr=2] {data/cont_xy.dat};
+\addplot3[black, line width=0.7pt] coordinates
+  {(20.8,31.6,3) (69.2,31.6,3) (69.2,68.4,3) (20.8,68.4,3) (20.8,31.6,3)};
 \end{axis}
 \end{tikzpicture}\hfill
 \begin{tikzpicture}[font=\footnotesize, baseline]
-\begin{axis}[bwaxis, grid=none, width=0.44\textwidth, height=0.40\textwidth,
-  xlabel={$y$ / mm}, ylabel={$z$ / mm},
+\begin{axis}[bwaxis, grid=none, width=0.45\textwidth, height=0.42\textwidth,
+  view={0}{90}, xlabel={$y$ / mm}, ylabel={$z$ / mm},
   title={\footnotesize cut at $x = 45$ mm, floor $-25$ dB},
-  enlargelimits=false, axis on top, point meta min=0, point meta max=1,
-  colormap={grays}{gray(0cm)=(1); gray(1cm)=(0.86); gray(2cm)=(0.70); gray(3cm)=(0.52); gray(4cm)=(0.30); gray(5cm)=(0.08)},
-  colormap access=piecewise constant,]
-\addplot[matrix plot*, point meta=explicit, mesh/cols=44]
-  table[x=x, y=y, meta=e] {data/field_xz.dat};
-\draw[line width=1.1pt] (axis cs:22,0) -- (axis cs:78,0);
-\draw[line width=1.1pt] (axis cs:31.6,1.57) -- (axis cs:68.4,1.57);
+  enlargelimits=false, axis on top, colormap={gray}{gray(0cm)=(1); gray(1cm)=(0.05)},]
+\addplot3[surf, shader=interp, mesh/cols=90] table[x=x, y=y, z=e] {data/field_xz.dat};
+\addplot3[black, line width=0.25pt] table[x=x, y=y, z expr=2] {data/cont_xz.dat};
+\addplot3[black, line width=0.9pt] coordinates {(22,0,3) (78,0,3)};
+\addplot3[black, line width=0.9pt] coordinates {(31.6,1.57,3) (68.4,1.57,3)};
 \end{axis}
 \end{tikzpicture}
-\caption{Magnitude of the electric field at \(2.4\) GHz with the port driven,
-on six grey levels of a decibel scale relative to the peak of each cut. Left,
-a horizontal cut through the middle of the substrate with the patch outline
-and the feed drawn: the field is confined under the patch and forms the half
-wave variation along \(y\) that sets the resonant length, with maxima at the
-two radiating edges and a null across the middle. Right, a vertical cut along the
-resonant direction through the middle of the patch, with the ground plane and
-the patch as the heavy lines: the same half wave appears in the substrate,
-and the field that escapes past the two patch edges is the fringing that
-radiates.}
+\caption{Magnitude of the electric field at the resonance, \(2.45\) GHz,
+with the port driven, on a decibel scale relative to the peak of each cut
+and contours at \(-11\), \(-7\), \(-4\) and \(-2\) dB of the range. Left, a horizontal cut
+through the middle of the substrate with the patch outline drawn: the field
+is confined under the patch and forms the half wave along \(y\) that sets the
+resonant length, with maxima at the two radiating edges and a null across the
+middle. Right, a vertical cut along the resonant direction through the middle
+of the patch, with the ground plane and the patch as the heavy lines: the
+same half wave appears in the substrate, and the field that escapes past the
+two patch edges is the fringing that radiates.}
 \label{fig:field}
 \end{figure}
 
@@ -645,14 +662,14 @@ radiates.}
 \toprule
 stage & time & share \\
 \midrule
-mesh, assembly and matrix build & 7.3 ms & once \\
-symbolic analysis & 1.5 ms & once \\
-numeric factorization & 46.5 ms & per frequency \\
-triangular solve & 1.0 ms & per frequency and port \\
+mesh, assembly and matrix build & 13.4 ms & once \\
+symbolic analysis & 4.5 ms & once \\
+numeric factorization & 229 ms & per frequency \\
+triangular solve & 2.9 ms & per frequency and port \\
 \bottomrule
 \end{tabular}
 \caption{Runtime by stage on the reference antenna. The factorization is
-97 percent of the work per frequency, so the fill of the ordering sets the
+99 percent of the work per frequency, so the fill of the ordering sets the
 runtime and the assembly does not.}
 \label{tab:time}
 \end{table}

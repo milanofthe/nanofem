@@ -119,11 +119,12 @@ builds the geometry and mesh with Gmsh, patch.nfm is the matching deck.
     gmsh -3 -format msh22 -o models/patch.msh models/patch.geo
     target/release/nanofem models/patch.nfm
 
-The sweep shows the resonance as an S11 dip at 2.45 GHz on the default mesh.
-That number is not converged: refining the mesh moves it to 2.50 GHz, and
-part of the remaining drift is the absorbing boundary, which sits only about
-a third of a wavelength above the patch. The model exercises the solver, it
-is not a converged antenna design.
+The domain is terminated by a perfectly matched layer, a ring around the
+footprint and a cap on top, which is why the air region is only 14 mm high:
+a PML needs no standoff from the radiator. The sweep shows the resonance as
+an S11 dip at 2.48 GHz against a design value of 2.45 GHz. Refining the mesh
+moves it to 2.50 GHz, so the discretization error is still the largest term.
+The model exercises the solver, it is not a converged antenna design.
 
 ## Tests
 

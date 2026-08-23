@@ -1,3 +1,6 @@
 /target
 models/patch.msh
 models/patch.vtk
+report/*.aux
+report/*.log
+report/*.out

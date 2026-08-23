@@ -1,0 +1,608 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper, margin=26mm]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usetikzlibrary{calc}
+\tikzset{vcenter/.style={baseline={(current bounding box.center)}}}
+\pgfplotsset{bwaxis/.style={
+  width=0.6\textwidth, height=0.34\textwidth, line width=0.4pt,
+  tick style={black}, label style={font=\small},
+  tick label style={font=\footnotesize},
+  legend style={font=\footnotesize, draw=black}, legend cell align=left,
+  grid=major, grid style={dotted, black!99, line width=0.3pt}}}
+\usepackage{titlesec}
+\usepackage{float}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+% ---------------------------------------------------------------- style ----
+
+\lstdefinelanguage{Rust}{
+  keywords={fn, let, mut, if, else, while, for, in, match, return, struct,
+    enum, impl, trait, pub, use, const, loop, continue, break, ref, type,
+    where, as, self, Self, true, false, Some, None, Ok, Err},
+  sensitive=true,
+  comment=[l]{//},
+  string=[b]",
+}
+
+\titleformat{\section}{\Large\bfseries}{\thesection}{0.8em}{}[{\vspace{1pt}\titlerule[0.5pt]}]
+\titlespacing*{\section}{0pt}{26pt}{12pt}
+
+\usetikzlibrary{patterns}
+
+% code tile
+\newtcblisting{rust}{listing only, breakable, sharp corners, colback=white,
+  colframe=black, boxrule=0.5pt, left=6pt, right=4pt, top=3pt, bottom=3pt,
+  listing options={language=Rust, basicstyle=\small\ttfamily,
+  commentstyle=\itshape, keywordstyle=\bfseries,
+  columns=fullflexible, keepspaces=true, breaklines=true}}
+
+% titled tiles: black frame, white body, title separated by a rule
+\newtcolorbox{derivation}[1]{breakable, sharp corners, colback=white,
+  colframe=black, colbacktitle=white, coltitle=black, titlerule=0.5pt,
+  fonttitle=\bfseries\small, title={Derivation: #1}, boxrule=0.5pt,
+  left=7pt, right=7pt, top=5pt, bottom=6pt}
+
+\newtcolorbox{decision}[1]{breakable, sharp corners, colback=white,
+  colframe=black, colbacktitle=white, coltitle=black, titlerule=0.5pt,
+  fonttitle=\bfseries\small, title={Design decision: #1}, boxrule=0.5pt,
+  left=7pt, right=7pt, top=5pt, bottom=6pt}
+
+\newtcolorbox{fieldnote}[1]{breakable, sharp corners, colback=white,
+  colframe=black, colbacktitle=white, coltitle=black, titlerule=0.5pt,
+  fonttitle=\bfseries\small, title={Failure mode: #1}, boxrule=0.5pt,
+  left=7pt, right=7pt, top=5pt, bottom=6pt}
+
+% loc tile: code section name, label, budget range [start, end] in loc space;
+% hatched = lines spent before this section, solid = this section
+\newcommand{\locbar}[4]{%
+\begin{tcolorbox}[sharp corners, colback=white, colframe=black,
+  boxrule=0.5pt, left=7pt, right=7pt, top=4pt, bottom=6pt]
+{\small\texttt{#1}\hfill #2}\\[4pt]
+\begin{tikzpicture}
+\pgfmathsetlengthmacro{\bw}{\linewidth-4pt}
+\fill[pattern=north east lines] (0,0) rectangle ({(#3/1000)*\bw}, 4.5pt);
+\fill[black] ({(#3/1000)*\bw},0) rectangle ({(#4/1000)*\bw}, 4.5pt);
+\draw[black, line width=0.4pt] (0,0) rectangle (\bw, 4.5pt);
+\end{tikzpicture}%
+\end{tcolorbox}\medskip}
+
+\title{\textbf{nanofem}\\[4pt]\large A 3D electromagnetic field solver in 1000 lines of Rust}
+\author{Milan Rother}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+nanofem solves the time harmonic curl-curl equation for the electric field
+on a tetrahedral mesh with first order Nedelec edge elements, and reports
+scattering parameters at lumped ports. It covers perfect conductors, a
+first order absorbing boundary, perfectly matched layers, dielectric,
+conductive and magnetic materials, lossy conductor sheets with the skin
+effect, and field export. The system is complex symmetric and is factored
+directly after a nested dissection ordering, with symmetric equilibration
+and one step of iterative refinement. The entire solver lives in one Rust
+source file of at most 1000 nonblank, noncomment lines, enforced by a test,
+with no dependencies outside the standard library. This report derives each
+algorithm, walks through the file in order, and explains the design
+decisions the budget forced. The bar under each section heading shows where
+that code section sits in the line budget.
+\end{abstract}
+
+\section{The budget as a design tool}
+
+The rule: one file, \texttt{src/main.rs}, at most 1000 lines after removing
+blank lines and comments, standard library only. A test reads the file,
+counts, and fails the build above the limit. Tests, meshes and comments are
+free. The budget forces every feature to displace another, which makes the
+cost of each decision explicit, and it keeps the solver readable in one
+sitting. That is the purpose of the repository.
+
+This report follows the source file from top to bottom. Every section
+corresponds to a part of the file and carries a bar showing which slice of
+the budget it occupies. Table~\ref{tab:budget} is the overview.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+code section & lines & cumulative \\
+\midrule
+constants, error and output plumbing & 13 & 13 \\
+complex arithmetic & 36 & 49 \\
+vectors, tetrahedron geometry, Whitney mass & 22 & 71 \\
+Gmsh mesh reader & 87 & 158 \\
+deck parser & 88 & 246 \\
+nested dissection ordering & 56 & 302 \\
+sparse \(LDL^T\), equilibration, refinement & 157 & 459 \\
+element tables and port data & 8 & 467 \\
+output rows and parameter conversion & 51 & 518 \\
+roles, materials, PML tensors & 73 & 591 \\
+edges, unknowns, group echo & 38 & 629 \\
+port geometry & 22 & 651 \\
+volume and boundary assembly & 76 & 727 \\
+matrix build and symbolic analysis & 46 & 773 \\
+frequency sweep and scattering parameters & 110 & 883 \\
+field export & 62 & 945 \\
+main & 9 & 954 \\
+\bottomrule
+\end{tabular}
+\caption{Line budget by code section, in file order.}
+\label{tab:budget}
+\end{table}
+
+The linear algebra is the largest block. That is the opposite of nanospice,
+where the parser dominated: a field solver has a trivial input format and a
+solver whose cost grows with the cube of the mesh resolution. Everything the
+budget excluded is listed with reasons in section~\ref{sec:cuts}.
+
+\section{The formulation}
+\locbar{theory only}{0 lines}{0}{0}
+
+Maxwell's equations with an \(e^{+j\omega t}\) time dependence give, after
+eliminating the magnetic field,
+\begin{equation}
+\nabla \times \left( \frac{1}{\mu_r} \nabla \times \mathbf{E} \right)
+- k_0^2 \varepsilon_r \mathbf{E} = -j k_0 \eta_0 \mathbf{J},
+\qquad k_0 = \frac{\omega}{c_0},
+\label{eq:curlcurl}
+\end{equation}
+with \(\eta_0\) the free space wave impedance. This is the only equation the
+solver discretizes. Multiplying by a test function \(\mathbf{W}\) and
+integrating by parts over the domain \(\Omega\) yields the weak form
+\begin{equation}
+\int_\Omega \frac{1}{\mu_r} (\nabla \times \mathbf{W}) \cdot (\nabla \times \mathbf{E})
+- k_0^2 \int_\Omega \varepsilon_r \mathbf{W} \cdot \mathbf{E}
++ \oint_{\partial\Omega} \mathbf{W} \cdot (\hat{n} \times \nabla \times \mathbf{E})
+= -j k_0 \eta_0 \int_\Omega \mathbf{W} \cdot \mathbf{J}.
+\label{eq:weak}
+\end{equation}
+The three volume and surface terms map one to one onto the three matrices
+the code assembles: a curl stiffness, an \(\varepsilon\) weighted mass, and
+a boundary term that carries every absorbing and port condition. Dropping
+the boundary integral leaves the natural boundary condition of the
+formulation, which is a perfect magnetic wall. That is a useful default: a
+symmetry plane of the magnetic type costs nothing at all, not even a card in
+the deck.
+
+\begin{decision}{edge elements rather than nodal elements}
+Expanding \(\mathbf{E}\) in nodal basis functions, one scalar unknown per
+component per node, fails for this equation in two ways. It cannot represent
+the field discontinuity normal to a material interface, and it produces
+spurious modes: the discrete curl-curl operator acquires eigenvectors with
+no physical counterpart, which contaminate resonances and scattering alike.
+Whitney edge elements assign one unknown to the tangential field along each
+edge. Tangential continuity across faces is then automatic and normal
+discontinuity is allowed, which is exactly the physical regularity of
+\(\mathbf{E}\). The gradient fields sit exactly in the kernel of the
+discrete curl, so they are represented rather than approximated, and no
+spurious modes appear. The cost is six unknowns per tetrahedron instead of
+twelve, so the choice is cheaper as well as correct.
+\end{decision}
+
+The Whitney function of the edge from local vertex \(a\) to local vertex
+\(b\) is built from the barycentric coordinates \(\lambda\) of the
+tetrahedron,
+\begin{equation}
+\mathbf{W}_{ab} = \lambda_a \nabla \lambda_b - \lambda_b \nabla \lambda_a,
+\qquad
+\nabla \times \mathbf{W}_{ab} = 2\, \nabla \lambda_a \times \nabla \lambda_b .
+\label{eq:whitney}
+\end{equation}
+Its tangential component along its own edge is one and along the other five
+edges is zero, so the unknown attached to an edge is the line integral of
+the field along it. The curl is constant over the element.
+
+\begin{derivation}{the element matrices in closed form}
+The gradients \(\nabla\lambda\) are constant over a straight tetrahedron, so
+the stiffness entry follows immediately from~\eqref{eq:whitney},
+\[
+S_{ij} = \int_T \frac{1}{\mu_r} (\nabla \times \mathbf{W}_i) \cdot (\nabla \times \mathbf{W}_j)
+= \frac{4V}{\mu_r} (\nabla\lambda_a \times \nabla\lambda_b) \cdot (\nabla\lambda_c \times \nabla\lambda_d),
+\]
+with \(V\) the element volume and \((a,b)\), \((c,d)\) the vertex pairs of
+edges \(i\) and \(j\). The mass entry needs only the integrals of products
+of barycentric coordinates, which are
+\(\int_T \lambda_p \lambda_q = V/10\) for \(p = q\) and \(V/20\) otherwise,
+giving the four term expression
+\[
+M_{ij} = (\nabla\lambda_b \cdot \nabla\lambda_d) I_{ac}
+- (\nabla\lambda_b \cdot \nabla\lambda_c) I_{ad}
+- (\nabla\lambda_a \cdot \nabla\lambda_d) I_{bc}
++ (\nabla\lambda_a \cdot \nabla\lambda_c) I_{bd}.
+\]
+No quadrature is needed anywhere in the element loop. The same expression,
+with the surface gradients of a triangle and \(I_{pq} = A/6\) or \(A/12\),
+gives the face mass matrix used by every boundary condition, so one helper
+serves both.
+\end{derivation}
+
+\section{Orientation, and why the solver has no signs}
+\locbar{Gmsh mesh reader}{87 lines, budget 71 to 158}{71}{158}
+
+The Whitney function of an edge depends on which of its two vertices is
+called \(a\). Two tetrahedra sharing an edge must agree, or their
+contributions cancel instead of adding. The textbook remedy is to give every
+global edge a reference direction and to carry a sign through assembly,
+excitation and field evaluation.
+
+\begin{decision}{sort the element vertices when reading the mesh}
+The mesh reader sorts the four node indices of every tetrahedron and the
+three of every triangle into ascending order. Every local edge \((a,b)\)
+then satisfies \(a < b\) in global numbering, so all elements agree on the
+direction of every shared edge by construction. The signs disappear from the
+solver entirely, not just from one loop: assembly, the port excitation
+integral and the field export are all sign free. This is one line in the
+reader against roughly ten scattered through the rest of the file, and it
+removes a class of bug that produces plausible looking output rather than an
+obvious failure. It is also what made second order elements reachable later,
+because the orientation of face functions became free as well.
+\end{decision}
+
+Sorting changes the sign of the Jacobian determinant, which is why the
+volume is taken as \(|\det|/6\); the barycentric gradients themselves are
+geometric quantities and do not depend on the vertex order.
+
+\section{Materials and the perfectly matched layer}
+\locbar{roles, materials, PML tensors}{73 lines, budget 518 to 591}{518}{591}
+
+A material is a relative permittivity with a loss tangent, a relative
+permeability, and a conductivity. A perfectly matched layer is not a
+material but a coordinate transformation: stretching coordinate \(k\) into
+the complex plane by \(s_k = 1 - j a_k\) turns an outgoing wave into a
+decaying one without reflecting it. Writing the stretched operator back in
+ordinary coordinates turns the stretch into a diagonal tensor applied to
+both \(\varepsilon\) and \(\mu\),
+\begin{equation}
+\Lambda_k = \frac{s_x s_y s_z}{s_k^2},
+\qquad
+\varepsilon \rightarrow \varepsilon \Lambda,
+\qquad
+\mu \rightarrow \mu \Lambda .
+\label{eq:pml}
+\end{equation}
+Applying the same tensor to both keeps the wave impedance of the layer equal
+to that of the region it terminates, which is what makes it reflectionless
+at the continuous level. The code stores \(\Lambda\) alone and multiplies the
+resulting mass entry by \(\varepsilon\), which costs one tensor contraction
+per element pair instead of two and is what lets conductivity reuse the same
+entry.
+
+A first order absorbing boundary is the cheaper alternative: the surface
+term of~\eqref{eq:weak} is replaced by \(j k_0 \sqrt{\varepsilon/\mu}\)
+times the tangential face mass matrix, which is exact for a plane wave at
+normal incidence and degrades with angle. It needs no extra mesh, while a
+PML needs a layer of elements. With three cells the PML reflects at
+\(-30.7\) dB in the test suite.
+
+\section{Loss, and one assembly for the whole sweep}
+\locbar{volume and boundary assembly}{76 lines, budget 651 to 727}{651}{727}
+
+Every entry of the system matrix is a sum of terms with a known dependence
+on \(k_0\). The curl stiffness is constant, the mass enters as \(-k_0^2\),
+and the boundary terms as \(+j k_0\). If that were the whole story the
+matrix would be a quadratic polynomial in \(k_0\) and the assembly could run
+once for an entire sweep. Two of the three loss mechanisms preserve this,
+and the third extends it by exactly one term.
+
+\begin{derivation}{conductivity is a term linear in the wave number}
+A conductive region has \(\varepsilon_c = \varepsilon_r - j\sigma/(\omega
+\varepsilon_0)\). Substituting into the mass term of~\eqref{eq:weak},
+\[
+-k_0^2 \varepsilon_c = -k_0^2 \varepsilon_r + j \frac{k_0^2 \sigma}{\omega \varepsilon_0}
+= -k_0^2 \varepsilon_r + j k_0 \eta_0 \sigma,
+\]
+using \(\omega = k_0 c_0\) and \(\eta_0 = 1/(c_0 \varepsilon_0)\). The
+conduction current is therefore a term linear in \(k_0\) built from the same
+mass matrix, so it needs no new element integral, only a second scaling of
+an entry that already exists.
+\end{derivation}
+
+\begin{derivation}{the skin effect is a term in the square root of the wave number}
+A good conductor is modelled as a surface impedance \(Z_s = (1+j) R_s\) with
+\(R_s = \sqrt{\omega \mu_0 / 2\sigma}\). Its contribution to the boundary
+term is \(j k_0 \eta_0 / Z_s\) times the face mass matrix. With \(\omega \mu_0
+= k_0 \eta_0\),
+\[
+\frac{j k_0 \eta_0}{(1+j)\sqrt{k_0 \eta_0 / 2\sigma}}
+= \sqrt{k_0} \, \frac{j}{1+j} \sqrt{2 \sigma \eta_0}
+= \sqrt{k_0} \, \frac{1+j}{2} \sqrt{2 \sigma \eta_0}.
+\]
+The frequency dependence collapses to \(\sqrt{k_0}\) with a constant
+coefficient.
+\end{derivation}
+
+\begin{decision}{four coefficients per matrix entry}
+Each assembled entry stores four complex numbers, the coefficients against
+the basis \(\{1,\, k_0,\, k_0^2,\, \sqrt{k_0}\}\). Evaluating a frequency is
+then four multiplications per nonzero. The assembly, which walks every
+tetrahedron and every boundary face and touches the mesh, runs exactly once
+no matter how many frequencies the sweep contains. This is the decision that
+buys the most in this file: it keeps frequency dependent physics and a
+one-time assembly at the same time, and it costs one array index rather than
+a rebuild.
+\end{decision}
+
+\section{Ordering and the direct solve}
+\locbar{ordering and sparse \(LDL^T\)}{213 lines, budget 246 to 459}{246}{459}
+
+The system is complex symmetric, not Hermitian: the absorbing boundary and
+the port sheets contribute \(j\) times a real symmetric matrix. It is
+therefore factored as \(LDL^T\) without conjugation, up-looking, with the
+elimination tree and exact column counts computed once in a symbolic pass
+and reused for every frequency of the sweep.
+
+\begin{decision}{a direct solver, not an iterative one}
+Iterative solvers are the standard choice at this problem size, but the
+curl-curl operator defeats the simple ones. Its large gradient nullspace
+makes Krylov methods with a diagonal preconditioner converge arbitrarily
+slowly, and the preconditioners that do work, auxiliary space methods or
+algebraic multigrid on the edge space, are far larger than the entire
+budget. A direct factorization has a predictable cost and no convergence
+parameters. The price is memory: the practical ceiling is a few tens of
+thousands of unknowns.
+\end{decision}
+
+Fill is controlled by a geometric nested dissection ordering: split the
+unknowns at the median of the longest bounding box axis, take as separator
+those vertices of the second half with a neighbour in the first, order both
+halves recursively and the separator last. On the reference antenna this
+gives \(0.46\) million nonzeros in \(L\) against \(3.55\) million in the
+natural order, a factor of \(7.7\).
+
+\begin{fieldnote}{a fill heuristic that reads better than it measures}
+An obvious refinement is to take the smaller of the two candidate boundary
+layers as the separator rather than always the second. Implemented and
+measured, it produced \(0.47\) million nonzeros, slightly worse, and was
+removed. The general lesson holds for the whole file: fill reducing
+heuristics are cheap to reason about and cheap to be wrong about, so they
+are measured rather than argued.
+\end{fieldnote}
+
+\subsection{Equilibration and refinement}
+
+Without pivoting an \(LDL^T\) can lose accuracy on an indefinite matrix, and
+the curl-curl system is indefinite by construction above the first
+resonance. Bunch-Kaufman pivoting is the textbook remedy and does not fit
+the budget. Two cheaper measures cover most of the ground.
+
+The matrix is first equilibrated symmetrically, \(D A D\) with \(D_{ii} =
+|A_{ii}|^{-1/2}\), which puts the rows on a common scale. Figure~\ref{fig:cond}
+shows the effect on the spread of the pivots, which the factorization
+produces for free and which bounds the condition number from below.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[bwaxis, width=0.72\textwidth, height=0.36\textwidth,
+  xmode=log, ymode=log, xlabel={frequency / Hz},
+  ylabel={$\max|D| / \min|D|$}, legend pos=north east]
+\addplot[black, thick, mark=*, mark size=1.4pt] table[x=f, y=cond] {data/cond.dat};
+\addplot[black, dashed, mark=o, mark size=1.6pt] table[x=f, y=plain] {data/cond.dat};
+\legend{equilibrated, as assembled}
+\end{axis}
+\end{tikzpicture}
+\caption{Pivot spread of the reference antenna against frequency. The
+\(1/f^2\) branch on the left is the low frequency breakdown of the
+curl-curl operator, which loses the mass term that regularizes its
+nullspace. The rise on the right sets in once the mesh becomes coarse
+against the wavelength. Equilibration gains a factor of about six where it
+matters.}
+\label{fig:cond}
+\end{figure}
+
+Every solve is then followed by one step of iterative refinement against the
+unscaled matrix: form \(r = b - Ax\), solve \(A \delta = r\) with the
+factorization already in hand, and add. It costs two sparse matrix vector
+products and one extra triangular solve, against a factorization that
+dominates the runtime by two orders of magnitude, and it lowers the relative
+residual by about a factor of four. The larger benefit is that the residual
+is measured rather than assumed, and both it and the pivot spread are
+printed at the end of a run.
+
+\begin{decision}{report the residual instead of trusting the factorization}
+A direct solver that returns a vector says nothing about how well it solved.
+Since the residual costs one matrix vector product once refinement is
+present, the solver reports the worst relative residual over the sweep. A
+user then knows whether a run is trustworthy without having to reason about
+conditioning, and the number is small enough to print on one line.
+\end{decision}
+
+\section{Ports and scattering parameters}
+\locbar{port geometry, sweep and parameters}{132 lines, budget 629 to 651 and 773 to 883}{629}{883}
+
+A lumped port is a rectangular patch of boundary carrying a sheet impedance
+in parallel with an impressed surface current, the Norton equivalent of a
+source with internal resistance. Its geometry is read from the mesh: the
+height \(h\) is the extent of the patch along the given voltage direction
+and the width follows from the total area, \(w = A/h\). The sheet impedance
+is then \(Z_s = z_0 w / h\), and the port contributes \(j k_0 \eta_0 / Z_s\)
+times the face mass matrix, the same expression as every other boundary
+condition.
+
+\begin{derivation}{port voltage without the port area}
+The port voltage is the mean field along the direction \(\hat{u}\) times the
+height,
+\[
+V = -\frac{h}{A} \int_A \mathbf{E} \cdot \hat{u} \, dA = -\frac{1}{w} \int_A \mathbf{E} \cdot \hat{u} \, dA,
+\]
+since \(A = wh\). The area cancels, so the port needs to store only its
+width. With port \(p\) driven, the scattering matrix follows from
+\(S_{qp} = 2 V_q / \sqrt{z_{0p} z_{0q}} - \delta_{qp}\).
+\end{derivation}
+
+One factorization serves all ports of a frequency, since only the right hand
+side changes. The frequencies of a sweep are independent problems and run on
+separate threads, each holding its own factorization, with the thread count
+capped by a memory budget rather than by the core count alone.
+
+The impedance and admittance matrices follow from the scattering matrix by
+\(Z = D(I+S)(I-S)^{-1}D\) with \(D = \mathrm{diag}\sqrt{z_0}\), which needs a
+small dense complex solve, and \(Y = Z^{-1}\), which needs a second. Reading
+a port as a coil gives \(L = \mathrm{Im}(Z)/\omega\) and
+\(Q = \mathrm{Im}(Z)/\mathrm{Re}(Z)\), the quantities an inductor extraction
+reports.
+
+\section{Results}
+
+The reference model is an edge fed microstrip patch antenna on a
+\(1.57\) mm substrate of \(\varepsilon_r = 2.2\), meshed by Gmsh into
+\(3760\) tetrahedra and \(4215\) unknowns.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[bwaxis, width=0.72\textwidth, height=0.34\textwidth,
+  xlabel={frequency / GHz}, ylabel={$|S_{11}|$ / dB}]
+\addplot[black, thick] table[x expr={\thisrow{f}/1e9}, y=db] {data/patch.dat};
+\end{axis}
+\end{tikzpicture}
+\caption{Reflection of the reference antenna. The resonance appears as a dip
+near \(2.4\) GHz on this mesh. It is not converged: refining the mesh moves
+it to \(2.48\) GHz, and part of the remaining drift is the first order
+absorbing boundary, which sits about a third of a wavelength above the
+patch.}
+\label{fig:patch}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+stage & time & share \\
+\midrule
+mesh, assembly and matrix build & 7.3 ms & once \\
+symbolic analysis & 1.5 ms & once \\
+numeric factorization & 46.5 ms & per frequency \\
+triangular solve & 1.0 ms & per frequency and port \\
+\bottomrule
+\end{tabular}
+\caption{Where the time goes on the reference antenna. The factorization is
+the whole cost, which is why the ordering was measured and the assembly was
+not optimized.}
+\label{tab:time}
+\end{table}
+
+\section{Validation}
+
+Twelve integration tests run the release binary against structured meshes
+generated inside the test file, almost all with a closed form reference.
+Table~\ref{tab:valid} lists the quantitative ones.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llrr}
+\toprule
+case & quantity & nanofem & closed form \\
+\midrule
+matched TEM line & \(|S_{21}|\) & 1.0000 & 1 \\
+shorted line & \(|S_{11}|\) & 1.0000 & 1 \\
+mismatched port & \(\mathrm{Re}(S_{11})\) & \(-0.332\) & \(-1/3\) \\
+lossy dielectric line & \(|S_{21}|\) & 0.9629 & 0.9630 \\
+conductive filling & \(|S_{21}|\) & 0.7993 & 0.7984 \\
+lossy plates & \(|S_{21}|\) & 0.98020 & 0.98019 \\
+shorted line & \(\mathrm{Im}(Z_{11})\) / \(\Omega\) & 96.801 & 96.798 \\
+shorted line & \(L\) / nH & 154.06 & 154.06 \\
+absorbing wall & \(|S_{11}|\) & 0.0018 & 0 \\
+three cell PML & \(|S_{11}|\) & 0.0293 & 0 \\
+PEC cavity & \(f_{101}\) / GHz & 2.10 & 2.12 \\
+\bottomrule
+\end{tabular}
+\caption{Quantitative tests against closed form results. The cavity is fed
+through an aperture, which loads it and accounts for most of the difference
+from the closed cavity mode.}
+\label{tab:valid}
+\end{table}
+
+\begin{fieldnote}{a wrong orientation still produces plausible parameters}
+The sharpest test in the project was not in this list. During an experiment
+with second order elements, the accumulated phase error of the TEM line was
+measured against its exact value \(-k_0 L\) at several frequencies. Theory
+says that error grows as \(k^{2p+1}\), so tripling the frequency must
+multiply it by about \(27\) at first order and \(243\) at second.
+Table~\ref{tab:order} shows what was measured. A wrong orientation or a
+mismatched face function still produces plausible looking scattering
+parameters, but it destroys the rate, which is why a rate is worth more as a
+test than a value.
+\end{fieldnote}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{rrr}
+\toprule
+cells per wavelength & phase error, \(p=1\) & phase error, \(p=2\) \\
+\midrule
+30.0 & \(1.63 \times 10^{-3}\) & \(5.19 \times 10^{-8}\) \\
+10.0 & \(4.53 \times 10^{-2}\) & \(1.42 \times 10^{-5}\) \\
+6.0 & \(2.22 \times 10^{-1}\) & \(2.25 \times 10^{-4}\) \\
+3.7 & \(1.04 \times 10^{0}\) & \(3.57 \times 10^{-3}\) \\
+\bottomrule
+\end{tabular}
+\caption{Accumulated phase error in radians over the reference line. The
+measured growth per factor three in frequency was \(27.8\) at first order
+and \(274\) at second, against \(27\) and \(243\) from theory.}
+\label{tab:order}
+\end{table}
+
+\section{The cut list}
+\label{sec:cuts}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrl}
+\toprule
+feature & estimated lines & reason \\
+\midrule
+second order elements & 150 to 190 & built, measured, removed \\
+modal waveguide ports & 200+ & needs a 2D eigensolver \\
+supernodal factorization & 200+ & the only remaining speed lever \\
+moment matching sweeps & 50+ & diverges near resonances \\
+adaptive mesh refinement & 100+ & needs an error estimator \\
+dispersive materials & 40 & breaks the four coefficient scheme \\
+deck validation & 31 & belongs to whatever writes the deck \\
+\bottomrule
+\end{tabular}
+\caption{What the budget excluded.}
+\end{table}
+
+Second order elements are the interesting entry. They were implemented,
+validated by the convergence rate of table~\ref{tab:order}, and then
+removed. They work: twenty unknowns per tetrahedron instead of six, the six
+Whitney functions plus six curl free edge gradients plus two functions per
+face, and the vertex sorting of the mesh reader made their orientation free.
+At six cells per wavelength they are three orders of magnitude more accurate
+than first order on the same mesh. They also consume the entire remaining
+budget and multiply the number of unknowns by five, and the project is worth
+more with room left for the rest of the physics. The code is kept on a
+branch.
+
+\section{Closing}
+
+The parts of this solver that matter are not large. The formulation is one
+equation, the element matrices are closed form, the boundary conditions are
+one face mass matrix with four different weights, and the port is a sheet
+impedance. What the budget mainly bought was the discipline to find the
+decisions that make those parts small: sorting the mesh vertices so that
+orientation never appears, storing four frequency coefficients so that
+assembly happens once, and keeping one tensor for the layer stretch so that
+conductivity reuses the mass entry. Each of those is worth more than the
+lines it saves, because it removes a category of bookkeeping rather than
+compressing it.
+
+The measurements matter as much. The separator refinement that looked
+obviously better and was not, the equilibration that helps by a factor of
+six at low frequency and slightly hurts in band, and the second order
+elements that work and were still cut are all decisions that could have gone
+the other way on argument alone. They went the way the numbers pointed.
+
+\end{document}

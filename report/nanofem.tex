@@ -205,33 +205,49 @@ the field along it. The curl is constant over the element.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[scale=1.0, font=\footnotesize,
-  ed/.style={line width=0.5pt, ->, >=stealth, shorten >=2pt, shorten <=2pt},
-  hd/.style={line width=0.4pt, dashed, ->, >=stealth, shorten >=2pt, shorten <=2pt}]
-\coordinate (v0) at (0,0);
-\coordinate (v1) at (4.2,0.15);
-\coordinate (v2) at (1.15,0.95);
-\coordinate (v3) at (2.6,2.6);
-\draw[ed] (v0) -- (v1);
-\draw[hd] (v0) -- (v2);
-\draw[ed] (v0) -- (v3);
-\draw[hd] (v1) -- (v2);
-\draw[ed] (v1) -- (v3);
-\draw[hd] (v2) -- (v3);
-\foreach \i in {0,1,2,3} \fill (v\i) circle (1.6pt);
-\node[below left] at (v0) {$n_0$};
-\node[below right] at (v1) {$n_1$};
-\node[below right, inner sep=1pt] at (v2) {$n_2$};
-\node[above] at (v3) {$n_3$};
-\node[below] at ($(v0)!0.5!(v1)$) {$\mathbf{W}_{01}$};
-\node[left] at ($(v0)!0.68!(v3)$) {$\mathbf{W}_{03}$};
-\node[right] at ($(v1)!0.55!(v3)$) {$\mathbf{W}_{13}$};
+\begin{tikzpicture}[font=\footnotesize,
+  sd/.style={line width=0.6pt, ->, >=stealth, shorten >=2.5pt, shorten <=2.5pt},
+  hd/.style={line width=0.4pt, dashed, ->, >=stealth, shorten >=2.5pt, shorten <=2.5pt}]
+% base as a flattened ellipse seen from above, apex over its centre
+\coordinate (n0) at (0.30,0.55);
+\coordinate (n1) at (3.70,0.85);
+\coordinate (n2) at (2.35,1.45);
+\coordinate (n3) at (1.40,3.05);
+\draw[sd] (n0) -- (n1);
+\draw[hd] (n0) -- (n2);
+\draw[sd] (n0) -- (n3);
+\draw[hd] (n1) -- (n2);
+\draw[sd] (n1) -- (n3);
+\draw[hd] (n2) -- (n3);
+\foreach \i in {0,1,2,3} \fill (n\i) circle (1.7pt);
+\node[below left, inner sep=2pt] at (n0) {$n_0$};
+\node[below right, inner sep=2pt] at (n1) {$n_1$};
+\node[below, inner sep=3pt] at (n2) {$n_2$};
+\node[above, inner sep=3pt] at (n3) {$n_3$};
+\node[below, inner sep=3pt] at ($(n0)!0.5!(n1)$) {$\mathbf{W}_{01}$};
+\node[left, inner sep=2pt] at ($(n0)!0.6!(n3)$) {$\mathbf{W}_{03}$};
+\node[right, inner sep=2pt] at ($(n1)!0.35!(n3)$) {$\mathbf{W}_{13}$};
+\begin{scope}[xshift=5.1cm, yshift=0.3cm]
+\node[anchor=north west, inner sep=0pt] at (0,2.6) {\begin{tabular}{cc}
+\toprule
+edge & nodes \\
+\midrule
+0 & $(n_0, n_1)$ \\
+1 & $(n_0, n_2)$ \\
+2 & $(n_0, n_3)$ \\
+3 & $(n_1, n_2)$ \\
+4 & $(n_1, n_3)$ \\
+5 & $(n_2, n_3)$ \\
+\bottomrule
+\end{tabular}};
+\end{scope}
 \end{tikzpicture}
-\caption{The six edge unknowns of a tetrahedron. The unknown on an edge is
-the line integral of \(\mathbf{E}\) along it. Node indices are sorted on
-input, so every arrow runs from the lower to the higher global index and two
-tetrahedra sharing an edge assign it the same direction without a sign
-convention. Dashed edges are behind the front face.}
+\caption{The six edge unknowns of a tetrahedron and the local edge table the
+code uses. The unknown on an edge is the line integral of \(\mathbf{E}\)
+along it. Node indices are sorted on input, so every arrow runs from the
+lower to the higher global index and two tetrahedra sharing an edge assign
+it the same direction without a sign convention. Edges meeting the rear node
+\(n_2\) are dashed.}
 \label{fig:tet}
 \end{figure}
 
@@ -579,6 +595,48 @@ it to \(2.48\) GHz, and part of the remaining drift is the first order
 absorbing boundary, which sits about a third of a wavelength above the
 patch.}
 \label{fig:patch}
+\end{figure}
+
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[font=\footnotesize, baseline]
+\begin{axis}[bwaxis, grid=none, width=0.44\textwidth, height=0.40\textwidth,
+  xlabel={$x$ / mm}, ylabel={$y$ / mm},
+  title={\footnotesize substrate, $z = h/2$, floor $-20$ dB},
+  enlargelimits=false, axis on top, point meta min=0, point meta max=1,
+  colormap={grays}{gray(0cm)=(1); gray(1cm)=(0.86); gray(2cm)=(0.70); gray(3cm)=(0.52); gray(4cm)=(0.30); gray(5cm)=(0.08)},
+  colormap access=piecewise constant,]
+\addplot[matrix plot*, point meta=explicit, mesh/cols=44]
+  table[x=x, y=y, meta=e] {data/field_xy.dat};
+\draw[line width=0.7pt] (axis cs:20.8,31.6) rectangle (axis cs:69.2,68.4);
+\draw[line width=1.1pt] (axis cs:43,31.6) -- (axis cs:47,31.6);
+\end{axis}
+\end{tikzpicture}\hfill
+\begin{tikzpicture}[font=\footnotesize, baseline]
+\begin{axis}[bwaxis, grid=none, width=0.44\textwidth, height=0.40\textwidth,
+  xlabel={$y$ / mm}, ylabel={$z$ / mm},
+  title={\footnotesize cut at $x = 45$ mm, floor $-25$ dB},
+  enlargelimits=false, axis on top, point meta min=0, point meta max=1,
+  colormap={grays}{gray(0cm)=(1); gray(1cm)=(0.86); gray(2cm)=(0.70); gray(3cm)=(0.52); gray(4cm)=(0.30); gray(5cm)=(0.08)},
+  colormap access=piecewise constant,]
+\addplot[matrix plot*, point meta=explicit, mesh/cols=44]
+  table[x=x, y=y, meta=e] {data/field_xz.dat};
+\draw[line width=1.1pt] (axis cs:22,0) -- (axis cs:78,0);
+\draw[line width=1.1pt] (axis cs:31.6,1.57) -- (axis cs:68.4,1.57);
+\end{axis}
+\end{tikzpicture}
+\caption{Magnitude of the electric field at \(2.4\) GHz with the port driven,
+on six grey levels of a decibel scale relative to the peak of each cut. Left,
+a horizontal cut through the middle of the substrate with the patch outline
+and the feed drawn: the field is confined under the patch and forms the half
+wave variation along \(y\) that sets the resonant length, with maxima at the
+two radiating edges and a null across the middle. Right, a vertical cut along the
+resonant direction through the middle of the patch, with the ground plane and
+the patch as the heavy lines: the same half wave appears in the substrate,
+and the field that escapes past the two patch edges is the fringing that
+radiates.}
+\label{fig:field}
 \end{figure}
 
 \begin{table}[H]

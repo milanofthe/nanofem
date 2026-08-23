@@ -23,7 +23,7 @@ Output goes to stdout, diagnostics to stderr. The default output is
 Touchstone. The `output` card switches to derived port quantities as comma
 separated values with a header: `z` and `y` are the impedance and admittance
 matrices, `lq` reads each port as a coil and gives its inductance and
-quality factor, which is what an inductor or interconnect extraction wants.
+quality factor.
 
 ## Deck format
 
@@ -45,10 +45,10 @@ groups defined in the Gmsh mesh.
 
 Volume groups without a `mat` card are vacuum. Surfaces without a role are
 natural boundaries, which for the curl-curl equation means PMC, so a
-symmetry plane costs nothing. Ports are rectangular sheets: the direction
-vector points from one terminal to the other, the port height is the mesh
-extent along that direction, and the width follows from the face area. Put
-nothing or PEC behind a PML.
+magnetic symmetry plane needs no card. Ports are rectangular sheets: the
+direction vector points from one terminal to the other, the port height is
+the mesh extent along that direction, and the width follows from the face
+area. Put nothing or PEC behind a PML.
 
 The mesh must be Gmsh version 2.2 ASCII (`gmsh -3 -format msh22 model.geo`).
 Triangles, tetrahedra and their physical groups are read, everything else in
@@ -95,23 +95,21 @@ Derivations are in report/nanofem.pdf.
 ## Diagnostics
 
 Before solving, nanofem prints how it understood every physical group,
-including the ones the deck never names, because a group that silently
-defaults to vacuum or to a natural PMC wall is the mistake no input check
-can catch.
+including the ones the deck never names. A group the deck does not mention
+becomes vacuum or a natural PMC wall, which is valid input and therefore
+not reachable by any check.
 
 After the sweep it prints the worst pivot spread and the worst relative
 residual. The pivot spread is a free lower bound on the condition number: it
 grows like one over frequency squared towards low frequency, where the
 curl-curl operator loses the mass term that regularizes its nullspace, and
 it grows again once the mesh gets coarse against the wavelength. The
-residual says how well the system was actually solved rather than how well
-it was assumed to be. Together they tell you whether a run was in a
-trustworthy regime.
+residual states how well the system was solved, measured rather than
+assumed.
 
-A malformed mesh file is reported rather than indexed past the end, but
-nanofem does not otherwise police the deck. Checking that a model makes
-sense belongs to whatever generates the deck, the same division of labour
-nanospice uses for netlists.
+A malformed mesh file is reported rather than indexed past the end. The
+deck is otherwise not checked: whether a model makes sense is decided by
+whatever generates it.
 
 ## Models
 

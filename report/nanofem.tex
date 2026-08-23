@@ -171,9 +171,8 @@ The three volume and surface terms map one to one onto the three matrices
 the code assembles: a curl stiffness, an \(\varepsilon\) weighted mass, and
 a boundary term that carries every absorbing and port condition. Dropping
 the boundary integral leaves the natural boundary condition of the
-formulation, which is a perfect magnetic wall. That is a useful default: a
-symmetry plane of the magnetic type costs nothing at all, not even a card in
-the deck.
+formulation, which is a perfect magnetic wall. A magnetic symmetry plane
+therefore needs no card in the deck.
 
 \begin{decision}{edge elements rather than nodal elements}
 Expanding \(\mathbf{E}\) in nodal basis functions, one scalar unknown per
@@ -186,8 +185,7 @@ edge. Tangential continuity across faces is then automatic and normal
 discontinuity is allowed, which is exactly the physical regularity of
 \(\mathbf{E}\). The gradient fields sit exactly in the kernel of the
 discrete curl, so they are represented rather than approximated, and no
-spurious modes appear. The cost is six unknowns per tetrahedron instead of
-twelve, so the choice is cheaper as well as correct.
+spurious modes appear. The cost is six unknowns per tetrahedron instead of twelve.
 \end{decision}
 
 The Whitney function of the edge from local vertex \(a\) to local vertex
@@ -227,7 +225,7 @@ gives the face mass matrix used by every boundary condition, so one helper
 serves both.
 \end{derivation}
 
-\section{Orientation, and why the solver has no signs}
+\section{The mesh reader and orientation}
 \locbar{Gmsh mesh reader}{87 lines, budget 71 to 158}{71}{158}
 
 The Whitney function of an edge depends on which of its two vertices is
@@ -240,13 +238,11 @@ excitation and field evaluation.
 The mesh reader sorts the four node indices of every tetrahedron and the
 three of every triangle into ascending order. Every local edge \((a,b)\)
 then satisfies \(a < b\) in global numbering, so all elements agree on the
-direction of every shared edge by construction. The signs disappear from the
-solver entirely, not just from one loop: assembly, the port excitation
-integral and the field export are all sign free. This is one line in the
-reader against roughly ten scattered through the rest of the file, and it
-removes a class of bug that produces plausible looking output rather than an
-obvious failure. It is also what made second order elements reachable later,
-because the orientation of face functions became free as well.
+direction of every shared edge by construction. Assembly, the port excitation integral and the field
+export are then all sign free. One line in the reader replaces about ten
+sign carrying expressions elsewhere. Second order elements inherit the same
+property, since their face functions are pinned by the sorted vertex triple
+of each face.
 \end{decision}
 
 Sorting changes the sign of the Jacobian determinant, which is why the
@@ -285,15 +281,15 @@ normal incidence and degrades with angle. It needs no extra mesh, while a
 PML needs a layer of elements. With three cells the PML reflects at
 \(-30.7\) dB in the test suite.
 
-\section{Loss, and one assembly for the whole sweep}
+\section{Loss and the frequency decomposition}
 \locbar{volume and boundary assembly}{76 lines, budget 651 to 727}{651}{727}
 
 Every entry of the system matrix is a sum of terms with a known dependence
 on \(k_0\). The curl stiffness is constant, the mass enters as \(-k_0^2\),
-and the boundary terms as \(+j k_0\). If that were the whole story the
-matrix would be a quadratic polynomial in \(k_0\) and the assembly could run
-once for an entire sweep. Two of the three loss mechanisms preserve this,
-and the third extends it by exactly one term.
+and the boundary terms as \(+j k_0\). Without loss the matrix is a quadratic
+polynomial in \(k_0\), so the assembly can run once for an entire sweep. Two
+of the three loss mechanisms preserve that form and the third extends it by
+one term.
 
 \begin{derivation}{conductivity is a term linear in the wave number}
 A conductive region has \(\varepsilon_c = \varepsilon_r - j\sigma/(\omega
@@ -325,12 +321,9 @@ coefficient.
 \begin{decision}{four coefficients per matrix entry}
 Each assembled entry stores four complex numbers, the coefficients against
 the basis \(\{1,\, k_0,\, k_0^2,\, \sqrt{k_0}\}\). Evaluating a frequency is
-then four multiplications per nonzero. The assembly, which walks every
-tetrahedron and every boundary face and touches the mesh, runs exactly once
-no matter how many frequencies the sweep contains. This is the decision that
-buys the most in this file: it keeps frequency dependent physics and a
-one-time assembly at the same time, and it costs one array index rather than
-a rebuild.
+then four multiplications per nonzero. The assembly runs once regardless of how many
+frequencies the sweep contains. The cost is three additional complex numbers
+per nonzero, against a rebuild of the element loop per frequency.
 \end{decision}
 
 \section{Ordering and the direct solve}
@@ -343,14 +336,13 @@ elimination tree and exact column counts computed once in a symbolic pass
 and reused for every frequency of the sweep.
 
 \begin{decision}{a direct solver, not an iterative one}
-Iterative solvers are the standard choice at this problem size, but the
-curl-curl operator defeats the simple ones. Its large gradient nullspace
-makes Krylov methods with a diagonal preconditioner converge arbitrarily
-slowly, and the preconditioners that do work, auxiliary space methods or
-algebraic multigrid on the edge space, are far larger than the entire
-budget. A direct factorization has a predictable cost and no convergence
-parameters. The price is memory: the practical ceiling is a few tens of
-thousands of unknowns.
+Iterative solvers are the usual choice at this problem size. The gradient
+nullspace of the curl-curl operator makes Krylov methods with a diagonal
+preconditioner converge slowly, and the preconditioners that work on the
+edge space, auxiliary space methods and algebraic multigrid, are larger than
+the entire budget. A direct factorization has a predictable cost and no
+convergence parameters. The ceiling is memory, at a few tens of thousands of
+unknowns.
 \end{decision}
 
 Fill is controlled by a geometric nested dissection ordering: split the
@@ -360,21 +352,18 @@ halves recursively and the separator last. On the reference antenna this
 gives \(0.46\) million nonzeros in \(L\) against \(3.55\) million in the
 natural order, a factor of \(7.7\).
 
-\begin{fieldnote}{a fill heuristic that reads better than it measures}
-An obvious refinement is to take the smaller of the two candidate boundary
-layers as the separator rather than always the second. Implemented and
-measured, it produced \(0.47\) million nonzeros, slightly worse, and was
-removed. The general lesson holds for the whole file: fill reducing
-heuristics are cheap to reason about and cheap to be wrong about, so they
-are measured rather than argued.
+\begin{fieldnote}{a smaller separator that increases fill}
+A refinement is to take the smaller of the two candidate boundary
+layers as the separator rather than always the second. Implemented and measured, it produced \(0.47\)
+million nonzeros against \(0.46\), and was removed.
 \end{fieldnote}
 
 \subsection{Equilibration and refinement}
 
 Without pivoting an \(LDL^T\) can lose accuracy on an indefinite matrix, and
 the curl-curl system is indefinite by construction above the first
-resonance. Bunch-Kaufman pivoting is the textbook remedy and does not fit
-the budget. Two cheaper measures cover most of the ground.
+resonance. Bunch-Kaufman pivoting is the standard remedy and does not
+fit the budget. Two cheaper measures are used instead.
 
 The matrix is first equilibrated symmetrically, \(D A D\) with \(D_{ii} =
 |A_{ii}|^{-1/2}\), which puts the rows on a common scale. Figure~\ref{fig:cond}
@@ -396,8 +385,8 @@ produces for free and which bounds the condition number from below.
 \(1/f^2\) branch on the left is the low frequency breakdown of the
 curl-curl operator, which loses the mass term that regularizes its
 nullspace. The rise on the right sets in once the mesh becomes coarse
-against the wavelength. Equilibration gains a factor of about six where it
-matters.}
+against the wavelength. Equilibration gains a factor of about six below
+\(1\) GHz and loses about a factor of three between \(1\) and \(5\) GHz.}
 \label{fig:cond}
 \end{figure}
 
@@ -406,16 +395,15 @@ unscaled matrix: form \(r = b - Ax\), solve \(A \delta = r\) with the
 factorization already in hand, and add. It costs two sparse matrix vector
 products and one extra triangular solve, against a factorization that
 dominates the runtime by two orders of magnitude, and it lowers the relative
-residual by about a factor of four. The larger benefit is that the residual
-is measured rather than assumed, and both it and the pivot spread are
-printed at the end of a run.
+residual by about a factor of four. The residual is then measured rather
+than assumed; it and the pivot spread are printed at the end of a run.
 
 \begin{decision}{report the residual instead of trusting the factorization}
-A direct solver that returns a vector says nothing about how well it solved.
-Since the residual costs one matrix vector product once refinement is
-present, the solver reports the worst relative residual over the sweep. A
-user then knows whether a run is trustworthy without having to reason about
-conditioning, and the number is small enough to print on one line.
+A direct solver returns a vector and no measure of how well it solved.
+Refinement already forms the residual, so reporting the worst relative
+residual over the sweep costs one further matrix vector product per solve.
+Conditioning then does not have to be inferred from the mesh and the
+frequency.
 \end{decision}
 
 \section{Ports and scattering parameters}
@@ -487,9 +475,9 @@ numeric factorization & 46.5 ms & per frequency \\
 triangular solve & 1.0 ms & per frequency and port \\
 \bottomrule
 \end{tabular}
-\caption{Where the time goes on the reference antenna. The factorization is
-the whole cost, which is why the ordering was measured and the assembly was
-not optimized.}
+\caption{Runtime by stage on the reference antenna. The factorization
+dominates, so the ordering was measured and the assembly was not
+optimized.}
 \label{tab:time}
 \end{table}
 
@@ -524,16 +512,15 @@ from the closed cavity mode.}
 \label{tab:valid}
 \end{table}
 
-\begin{fieldnote}{a wrong orientation still produces plausible parameters}
-The sharpest test in the project was not in this list. During an experiment
-with second order elements, the accumulated phase error of the TEM line was
-measured against its exact value \(-k_0 L\) at several frequencies. Theory
-says that error grows as \(k^{2p+1}\), so tripling the frequency must
-multiply it by about \(27\) at first order and \(243\) at second.
-Table~\ref{tab:order} shows what was measured. A wrong orientation or a
-mismatched face function still produces plausible looking scattering
-parameters, but it destroys the rate, which is why a rate is worth more as a
-test than a value.
+\begin{fieldnote}{an orientation error that the value tests miss}
+This test is absent from table~\ref{tab:valid} because the second order code
+it used is not in the current file. The accumulated phase error of the TEM
+line was measured against its exact value \(-k_0 L\) at several
+frequencies. That error grows as \(k^{2p+1}\), so tripling the frequency
+multiplies it by about \(27\) at first order and \(243\) at second.
+Table~\ref{tab:order} gives the measurement. A wrong orientation or a
+mismatched face function still produces plausible scattering parameters, but
+changes the rate.
 \end{fieldnote}
 
 \begin{table}[H]
@@ -565,7 +552,7 @@ feature & estimated lines & reason \\
 \midrule
 second order elements & 150 to 190 & built, measured, removed \\
 modal waveguide ports & 200+ & needs a 2D eigensolver \\
-supernodal factorization & 200+ & the only remaining speed lever \\
+supernodal factorization & 200+ & blocked kernels for the factorization \\
 moment matching sweeps & 50+ & diverges near resonances \\
 adaptive mesh refinement & 100+ & needs an error estimator \\
 dispersive materials & 40 & breaks the four coefficient scheme \\
@@ -575,34 +562,29 @@ deck validation & 31 & belongs to whatever writes the deck \\
 \caption{What the budget excluded.}
 \end{table}
 
-Second order elements are the interesting entry. They were implemented,
-validated by the convergence rate of table~\ref{tab:order}, and then
-removed. They work: twenty unknowns per tetrahedron instead of six, the six
-Whitney functions plus six curl free edge gradients plus two functions per
-face, and the vertex sorting of the mesh reader made their orientation free.
-At six cells per wavelength they are three orders of magnitude more accurate
-than first order on the same mesh. They also consume the entire remaining
-budget and multiply the number of unknowns by five, and the project is worth
-more with room left for the rest of the physics. The code is kept on a
-branch.
+Second order elements were implemented and validated by the convergence rate
+of table~\ref{tab:order} before being removed. They carry twenty unknowns
+per tetrahedron instead of six: the six Whitney functions, six curl free
+edge gradients, and two functions per face. At six cells per wavelength they
+are three orders of magnitude more accurate than first order on the same
+mesh. They also consume the remaining budget and multiply the number of
+unknowns by five. The code is kept on a branch.
 
 \section{Closing}
 
-The parts of this solver that matter are not large. The formulation is one
-equation, the element matrices are closed form, the boundary conditions are
-one face mass matrix with four different weights, and the port is a sheet
-impedance. What the budget mainly bought was the discipline to find the
-decisions that make those parts small: sorting the mesh vertices so that
-orientation never appears, storing four frequency coefficients so that
-assembly happens once, and keeping one tensor for the layer stretch so that
-conductivity reuses the mass entry. Each of those is worth more than the
-lines it saves, because it removes a category of bookkeeping rather than
-compressing it.
+The final count is 954 of 1000 lines. The solver covers the curl-curl
+equation with first order Nedelec elements, perfect electric conductors, a
+first order absorbing boundary, perfectly matched layers, magnetic symmetry
+planes, dielectric loss, volume conductivity, conductor sheets with the skin
+effect, lumped ports with scattering, impedance, admittance and inductance
+output, a geometric nested dissection ordering, a complex symmetric
+\(LDL^T\) with equilibration and iterative refinement, a parallel frequency
+sweep, and field export.
 
-The measurements matter as much. The separator refinement that looked
-obviously better and was not, the equilibration that helps by a factor of
-six at low frequency and slightly hurts in band, and the second order
-elements that work and were still cut are all decisions that could have gone
-the other way on argument alone. They went the way the numbers pointed.
+Three decisions account for most of what fits. Sorting the mesh vertices
+removes orientation from the solver. Four frequency coefficients per matrix
+entry keep the assembly at one pass for an entire sweep. Storing the layer
+stretch separately from the permittivity lets conductivity reuse the mass
+entry. Each removes bookkeeping rather than compressing it.
 
 \end{document}

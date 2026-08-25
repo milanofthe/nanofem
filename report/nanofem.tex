@@ -768,23 +768,26 @@ from the closed cavity mode.}
 
 \begin{table}[H]
 \centering
-\begin{tabular}{lrl}
+\begin{tabular}{ll}
 \toprule
-feature & estimated lines & reason \\
+feature & reason \\
 \midrule
-second order elements & 150 to 190 & five times the unknowns per mesh \\
-modal waveguide ports & 200+ & needs a 2D eigensolver \\
-supernodal factorization & 200+ & blocked kernels for the factorization \\
-moment matching sweeps & 50+ & diverges near resonances \\
-adaptive mesh refinement & 100+ & needs an error estimator \\
-dispersive materials & 40 & breaks the four coefficient scheme \\
-deck validation & 31 & belongs to whatever writes the deck \\
+second order elements & five times the unknowns per mesh \\
+modal waveguide ports & needs a 2D eigensolver \\
+supernodal factorization & blocked kernels for the factorization \\
+moment matching sweeps & diverges near resonances \\
+adaptive mesh refinement & needs an error estimator \\
+dispersive materials & breaks the four coefficient scheme \\
+deck validation & belongs to whatever writes the deck \\
 \bottomrule
 \end{tabular}
-\caption{What the budget excluded.}
+\caption{What the budget excluded. Deck validation is the only entry that was
+written and then removed, at 31 lines; the rest were never written, so what they
+would have cost is not known.}
 \end{table}
 
-Second order elements are the largest entry. They carry twenty unknowns per tetrahedron instead of six: the
+Second order elements are the entry that would change the most. They carry
+twenty unknowns per tetrahedron instead of six: the
 six Whitney functions, six curl free edge gradients, and two functions per
 face, the last pinned by the sorted vertex triple of each face and therefore
 also free of orientation handling. Their dispersion error scales as

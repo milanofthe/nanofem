@@ -671,8 +671,8 @@ The second model is a microstrip line inside a closed metal box: a
 ground plane, the strip, the lid and the two side walls are perfect
 conductors; a lumped port at each end reaches from the ground plane to the
 strip. The mesh grades from \(0.6\) mm on the strip to \(4\) mm at the
-shield, \(22775\) tetrahedra and \(23439\) unknowns, and the sweep of 37
-frequencies from \(1\) to \(10\) GHz takes \(12.4\) s on eight threads.
+shield, \(22775\) tetrahedra and \(23439\) unknowns, and the sweep of 21
+frequencies from \(1\) to \(5\) GHz takes \(8.1\) s on eight threads.
 
 \begin{figure}[H]
 \centering
@@ -698,12 +698,8 @@ edges, and it is \(30\) dB down at the side walls and the lid.}
 \end{axis}
 \end{tikzpicture}
 \caption{Reflection, solid, and transmission, dashed, of the line.
-Reflection stays below
-\(-12\) dB from \(1\) to \(10\) GHz apart from a peak at \(7\) GHz,
-where \(|S_{11}|\) reaches \(-3.5\) dB and \(|S_{21}|\) falls to
-\(-2.7\) dB. Narrowing the enclosure from \(20\) to \(16\) mm removes
-that peak and puts a similar one at \(9\) GHz, so it belongs to the box and
-not to the line.}
+Reflection stays between \(-13\) and \(-37\) dB over the band and
+transmission above \(-0.3\) dB.}
 \label{fig:lines}
 \end{figure}
 

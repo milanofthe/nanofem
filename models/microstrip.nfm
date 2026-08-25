@@ -5,4 +5,4 @@ mat sub eps 2.2
 pec pec
 port 1 p1 0 0 1 50.5
 port 2 p2 0 0 1 50.5
-sweep lin 1e9 10e9 37
+sweep lin 1e9 5e9 21

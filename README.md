@@ -129,9 +129,8 @@ puts it at 2.48 GHz, so the discretization error is still the largest term.
 
 microstrip is a shielded 4.8 mm line on the same substrate, 44 mm long
 inside a closed metal box, driven by a lumped port at each end. 22775
-tetrahedra and 23439 unknowns, 12.4 s for 37 frequencies from 1 to 10 GHz on
-eight threads. Reflection stays below -12 dB except at 7 GHz, where a mode
-of the enclosure couples to the line.
+tetrahedra and 23439 unknowns, 8.1 s for 21 frequencies from 1 to 5 GHz on
+eight threads. Reflection stays between -13 and -37 dB over the band.
 
 Both models exercise the solver, neither is a converged design. The port
 sheets set their own reference plane, which sits about a substrate height

@@ -113,18 +113,30 @@ whatever generates it.
 
 ## Models
 
-models/ holds an edge fed 2.45 GHz microstrip patch antenna. patch.geo
-builds the geometry and mesh with Gmsh, patch.nfm is the matching deck.
+models/ holds two models. Each .geo builds the geometry and mesh with Gmsh
+and the matching .nfm is the deck.
 
     gmsh -3 -format msh22 -o models/patch.msh models/patch.geo
     target/release/nanofem models/patch.nfm
 
-The domain is terminated by a perfectly matched layer, a ring around the
-footprint and a cap on top, which is why the air region is only 14 mm high:
-a PML needs no standoff from the radiator. The sweep shows the resonance as
-an S11 dip at 2.48 GHz against a design value of 2.45 GHz. Refining the mesh
-moves it to 2.50 GHz, so the discretization error is still the largest term.
-The model exercises the solver, it is not a converged antenna design.
+patch is an edge fed 2.45 GHz microstrip patch antenna, 37676 tetrahedra and
+41468 unknowns, about 3.7 s per frequency. The domain is terminated by a
+perfectly matched layer, a ring around the footprint and a cap on top, which
+is why the air region is only 20 mm high: a PML needs no standoff from the
+radiator. The sweep shows the resonance as an S11 dip at 2.50 GHz against a
+design value of 2.45 GHz. A mesh coarsened by a factor of one and a half
+puts it at 2.48 GHz, so the discretization error is still the largest term.
+
+microstrip is a shielded 4.8 mm line on the same substrate, 44 mm long
+inside a closed metal box, driven by a lumped port at each end. 22775
+tetrahedra and 23439 unknowns, 12.4 s for 37 frequencies from 1 to 10 GHz on
+eight threads. Reflection stays below -12 dB except at 7 GHz, where a mode
+of the enclosure couples to the line.
+
+Both models exercise the solver, neither is a converged design. The port
+sheets set their own reference plane, which sits about a substrate height
+inside the line, so the phase of the microstrip S matrix is not the phase of
+44 mm of line.
 
 ## Tests
 

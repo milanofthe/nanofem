@@ -585,6 +585,8 @@ reports.
 \section{Results}
 \label{sec:results}
 
+\subsection{A patch antenna}
+
 The reference model is an edge fed microstrip patch antenna on a
 \(1.57\) mm substrate of \(\varepsilon_r = 2.2\), terminated by a
 perfectly matched layer and meshed by Gmsh into
@@ -601,8 +603,7 @@ bottom is the substrate, the block above it is the air region, and the
 shaded ring and cap are the perfectly matched layer. The element size follows a distance field on the patch and the feed,
 growing from \(2\) mm at the metal to \(5.5\) mm at the outer corners, which
 keeps the aspect ratio bounded through the transition out of the
-\(1.57\) mm substrate. A uniform maximum size instead produces slivers
-spanning the air region and moves the resonance by two percent.}
+\(1.57\) mm substrate.}
 \label{fig:mesh}
 \end{figure}
 
@@ -661,6 +662,58 @@ factorization each, which is why the memory and not the arithmetic caps the
 thread count.}
 \label{tab:time}
 \end{table}
+
+\subsection{A shielded line}
+
+The second model is a microstrip line inside a closed metal box: a
+\(4.8\) mm strip on the same \(1.57\) mm substrate, \(44\) mm long, in a
+\(20\) mm wide enclosure with \(8\) mm of air above the substrate. The
+ground plane, the strip, the lid and the two side walls are perfect
+conductors; a lumped port at each end reaches from the ground plane to the
+strip. The mesh grades from \(0.6\) mm on the strip to \(4\) mm at the
+shield, \(22775\) tetrahedra and \(23439\) unknowns, and the sweep of 37
+frequencies from \(1\) to \(10\) GHz takes \(12.4\) s on eight threads.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\input{data/line3d.tikz}
+\end{tikzpicture}
+\caption{Contours of the electric field magnitude at \(5\) GHz on a
+transverse cut halfway along the line, at \(-21\), \(-15\), \(-9\) and
+\(-3\) dB below the peak of the cut. The heavy lines are the strip. The
+field is confined to the substrate under the strip and fringes past its two
+edges, and it is \(30\) dB down at the side walls and the lid.}
+\label{fig:line}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[bwaxis, width=0.72\textwidth, height=0.34\textwidth,
+  xlabel={frequency / GHz}, ylabel={dB}, legend pos=south west]
+\addplot[black, thick] table[x expr={\thisrow{f}/1e9}, y=s11] {data/line.dat};
+\addplot[black, dashed] table[x expr={\thisrow{f}/1e9}, y=s21] {data/line.dat};
+\legend{}
+\end{axis}
+\end{tikzpicture}
+\caption{Reflection, solid, and transmission, dashed, of the line.
+Reflection stays below
+\(-12\) dB from \(1\) to \(10\) GHz apart from a peak at \(7\) GHz,
+where \(|S_{11}|\) reaches \(-3.5\) dB and \(|S_{21}|\) falls to
+\(-2.7\) dB. Narrowing the enclosure from \(20\) to \(16\) mm removes
+that peak and puts a similar one at \(9\) GHz, so it belongs to the box and
+not to the line.}
+\label{fig:lines}
+\end{figure}
+
+The port sheet carries its own reference plane. Filling the same geometry
+homogeneously, where the phase constant follows from the fill alone, and
+extracting the propagation constant from the two port scattering matrix
+gives an electrical length between the sheets of \(46.8\) mm in air and
+\(47.1\) mm at \(\varepsilon_r = 2.2\), against \(44\) mm of geometry.
+The plane sits about one substrate height beyond each sheet, and a phase
+read off this matrix is the phase of that longer line.
 
 \section{Validation}
 

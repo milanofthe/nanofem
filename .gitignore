@@ -1,8 +1,8 @@
 /target
+__pycache__/
 models/patch.msh
 models/patch.vtk
+models/microstrip.msh
 report/*.aux
 report/*.log
 report/*.out
-
-__pycache__/

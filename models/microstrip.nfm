@@ -1,0 +1,8 @@
+* shielded microstrip line, 4.8 mm strip on 1.57 mm of eps_r 2.2
+* mesh: gmsh -3 -format msh22 -o microstrip.msh microstrip.geo
+mesh microstrip.msh
+mat sub eps 2.2
+pec pec
+port 1 p1 0 0 1 50.5
+port 2 p2 0 0 1 50.5
+sweep lin 1e9 10e9 37

@@ -11,8 +11,8 @@ SetFactory("OpenCASCADE");
 
 sx = 90; sy = 100;     // footprint
 h  = 1.57;             // substrate height
-Ha = 14;               // air above the substrate
-t  = 8;                // pml thickness
+Ha = 20;               // air above the substrate
+t  = 10;               // pml thickness
 pw = 48.4; pl = 36.8;  // patch width (x) and resonant length (y)
 fw = 4;                // feed width
 H  = h + Ha + t;       // total height
@@ -88,10 +88,10 @@ Field[1].SurfacesList = {patch(), feed()};
 Field[1].Sampling = 80;
 Field[2] = Threshold;
 Field[2].InField = 1;
-Field[2].SizeMin = 3.0;
-Field[2].SizeMax = 9.0;
+Field[2].SizeMin = 2.0;
+Field[2].SizeMax = 5.5;
 Field[2].DistMin = 3.0;
-Field[2].DistMax = 26.0;
+Field[2].DistMax = 30.0;
 Background Field = 2;
 Mesh.MeshSizeExtendFromBoundary = 0;
 Mesh.MeshSizeFromPoints = 0;

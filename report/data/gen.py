@@ -5,8 +5,7 @@ Run from the repository root after `cargo build --release`:
 
     python3 report/data/gen.py
 
-Writes cond.dat, patch.dat and the field grids and contours next to this
-file.
+Writes cond.dat, patch.dat, mesh3d.tikz and slice3d.tikz next to this file.
 No third party packages are used.
 """
 
@@ -22,6 +21,13 @@ MESH = os.path.join(ROOT, "models", "patch.msh")
 SUB = ("mat sub eps 2.2 tand 0.001\nmat sub_pml eps 2.2 tand 0.001\n"
        "pml sub_pml 3 3 3\npml air_pml 3 3 3\npec pec\n"
        "port 1 feed 0 0 1 200\n")
+
+# The 3d figures are one scene seen from one place: same direction, same
+# millimetres per millimetre, same origin, so the mesh and the field cut
+# overlay. Geometry in mm, as in models/patch.geo.
+H, SUBH, PMLT = 1.57, 0.00157, 10.0
+DOM = (0.0, 90.0, 0.0, 100.0, 0.0, 31.57)
+AZ, EL, WIDTH = 35.0, 20.0, 138.0
 
 
 def run(deck, keep_stderr=False):
@@ -55,16 +61,20 @@ def conditioning():
 
 
 def sweep():
-    """Reflection of the reference antenna over the resonance."""
+    """Reflection of the reference antenna, returning where it resonates."""
     out = run("mesh %s\n%ssweep lin 2.1e9 2.8e9 36\n" % (MESH, SUB))
+    rows = []
+    for line in out.splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        v = line.split()
+        m = math.hypot(float(v[1]), float(v[2]))
+        rows.append((float(v[0]), 20 * math.log10(max(m, 1e-12))))
     with open(os.path.join(HERE, "patch.dat"), "w") as f:
         f.write("f db\n")
-        for line in out.splitlines():
-            if line.startswith("#") or not line.strip():
-                continue
-            v = line.split()
-            m = math.hypot(float(v[1]), float(v[2]))
-            f.write("%.6e %.4f\n" % (float(v[0]), 20 * math.log10(max(m, 1e-12))))
+        for fr, db in rows:
+            f.write("%.6e %.4f\n" % (fr, db))
+    return min(rows, key=lambda r: r[1])[0]
 
 
 def read_vtk(path):
@@ -137,71 +147,6 @@ def contours(acc, bounds, nu, nv, scale, levels):
     return [((a[0] * scale, a[1] * scale), (b[0] * scale, b[1] * scale)) for a, b in segs]
 
 
-def write_grid(name, acc, bounds, nu, nv, scale, floor_db):
-    u0, u1, v0, v1 = bounds
-    with open(os.path.join(HERE, name), "w") as f:
-        f.write("x y e\n")
-        for r in range(nv):
-            for k in range(nu):
-                x = (u0 + (u1 - u0) * k / (nu - 1)) * scale
-                y = (v0 + (v1 - v0) * r / (nv - 1)) * scale
-                f.write("%.4f %.4f %.4f\n" % (x, y, (acc[r][k] - floor_db) / (-floor_db)))
-            f.write("\n")
-
-
-def write_contours(name, segs):
-    with open(os.path.join(HERE, name), "w") as f:
-        f.write("x y\n")
-        for a, b in segs:
-            f.write("%.4f %.4f\n%.4f %.4f\n\n" % (a[0], a[1], b[0], b[1]))
-
-
-def mesh_cut(plane=0.045, axis=0, u=1, v=2, name="mesh_cut.dat"):
-    """Intersection of the tetrahedral mesh with a plane, as polygons.
-
-    Each tetrahedron crossing the plane is cut into a triangle or a
-    quadrilateral. The polygon vertices are ordered by angle about their
-    centroid, which is enough for a convex cross section.
-    """
-    ls = open(MESH).read().splitlines()
-    i = ls.index("$Nodes")
-    n = int(ls[i + 1])
-    pos = {}
-    for k in range(n):
-        t = ls[i + 2 + k].split()
-        pos[int(t[0])] = (float(t[1]), float(t[2]), float(t[3]))
-    i = ls.index("$Elements")
-    tets = []
-    for k in range(int(ls[i + 1])):
-        t = ls[i + 2 + k].split()
-        if t[1] == "4":
-            nt = int(t[2])
-            tets.append([int(x) for x in t[3 + nt:]])
-    ED = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-    polys = []
-    for tet in tets:
-        pts = []
-        for a, b in ED:
-            pa, pb = pos[tet[a]], pos[tet[b]]
-            da, db = pa[axis] - plane, pb[axis] - plane
-            if da * db < 0:
-                w = da / (da - db)
-                pts.append((pa[u] + w * (pb[u] - pa[u]), pa[v] + w * (pb[v] - pa[v])))
-        if len(pts) < 3:
-            continue
-        cx = sum(q[0] for q in pts) / len(pts)
-        cy = sum(q[1] for q in pts) / len(pts)
-        pts.sort(key=lambda q: math.atan2(q[1] - cy, q[0] - cx))
-        polys.append(pts)
-    with open(os.path.join(HERE, name), "w") as f:
-        f.write("x y\n")
-        for q in polys:
-            for a in q + [q[0]]:
-                f.write("%.4f %.4f\n" % (a[0] * 1000.0, a[1] * 1000.0))
-            f.write("\n")
-    return len(polys)
-
-
 def read_msh():
     """Nodes and tagged tetrahedra of the reference mesh, in mm."""
     ls = open(MESH).read().splitlines()
@@ -220,20 +165,54 @@ def read_msh():
     return pos, tets
 
 
-def mesh3d(name="mesh3d.tikz", az=35.0, el=20.0, cut=50.0, width=112.0):
+def view():
+    """The shared projection, as a depth key and a point formatter.
+
+    The scale comes from the full domain, not from what a figure happens to
+    draw, so every figure that uses it is at the same size and the same
+    origin as the others.
+    """
+    a, e = math.radians(AZ), math.radians(EL)
+    ex = (-math.sin(a), math.cos(a), 0.0)
+    ey = (-math.cos(a) * math.sin(e), -math.sin(a) * math.sin(e), math.cos(e))
+    ez = (math.cos(a) * math.cos(e), math.sin(a) * math.cos(e), math.sin(e))
+    dot = lambda p, q: p[0] * q[0] + p[1] * q[1] + p[2] * q[2]
+    x0, x1, y0, y1, z0, z1 = DOM
+    pj = [(dot(c, ex), dot(c, ey)) for c in
+          [(x, y, z) for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)]]
+    sc = WIDTH / (max(q[0] for q in pj) - min(q[0] for q in pj))
+    ox, oy = min(q[0] for q in pj), min(q[1] for q in pj)
+    P = lambda p: ((dot(p, ex) - ox) * sc, (dot(p, ey) - oy) * sc)
+    D = lambda p: "(%.2fmm,%.2fmm)" % P(p)
+    return (lambda p: dot(p, ez)), D
+
+
+def boxwire(D, box=DOM):
+    """The twelve edges of a box, thin and light."""
+    c = [(x, y, z) for x in box[0:2] for y in box[2:4] for z in box[4:6]]
+    return ["\\draw[line width=0.25pt, black!40] %s -- %s;" % (D(c[i]), D(c[j]))
+            for i in range(8) for j in range(i + 1, 8)
+            if sum(1 for k in range(3) if c[i][k] != c[j][k]) == 1]
+
+
+def write(name, lines):
+    with open(os.path.join(HERE, name), "w") as f:
+        f.write("% generated by report/data/gen.py, do not edit\n"
+                + "\n".join(lines) + "\n")
+    return len(lines)
+
+
+def mesh3d(name="mesh3d.tikz", cut=50.0):
     """Cutaway render of the mesh as painter sorted, filled polygons.
 
     Half the domain is removed, the boundary faces of what remains are
     projected, sorted back to front and written as tikz paths. Filling each
     face opaque is what makes the interior read as solid rather than as a
-    wireframe.
+    wireframe. The domain is outlined first, so what the cut took away stays
+    visible as an empty box.
     """
     pos, tets = read_msh()
-    a, e = math.radians(az), math.radians(el)
-    ex = (-math.sin(a), math.cos(a), 0.0)
-    ey = (-math.cos(a) * math.sin(e), -math.sin(a) * math.sin(e), math.cos(e))
-    ez = (math.cos(a) * math.cos(e), math.sin(a) * math.cos(e), math.sin(e))
-    dot = lambda p, q: p[0] * q[0] + p[1] * q[1] + p[2] * q[2]
+    depth, D = view()
     keep = [(t, g) for t, g in tets if sum(pos[v][1] for v in t) / 4.0 <= cut]
     faces = {}
     for t, g in keep:
@@ -243,55 +222,69 @@ def mesh3d(name="mesh3d.tikz", az=35.0, el=20.0, cut=50.0, width=112.0):
                 faces[k] = None
             else:
                 faces[k] = g
-    out = [(k, g) for k, g in faces.items() if g is not None]
     proj = []
-    for k, g in out:
+    for k, g in faces.items():
+        if g is None:
+            continue
         p3 = [pos[v] for v in k]
-        d = sum(dot(q, ez) for q in p3) / 3.0
-        proj.append((d, [(dot(q, ex), dot(q, ey)) for q in p3], g))
+        proj.append((sum(depth(q) for q in p3) / 3.0, p3, g))
     proj.sort(key=lambda r: r[0])
-    xs = [q[0] for _, poly, _ in proj for q in poly]
-    ys = [q[1] for _, poly, _ in proj for q in poly]
-    sc = width / (max(xs) - min(xs))
-    x0, y0 = min(xs), min(ys)
-    with open(os.path.join(HERE, name), "w") as f:
-        f.write("% generated by report/data/gen.py, do not edit\n")
-        for _, poly, g in proj:
-            # the two absorbing groups are shaded, the physical region is white
-            fill = "black!12" if g in (3, 4) else "white"
-            pts = " -- ".join("(%.2fmm,%.2fmm)" % ((q[0] - x0) * sc, (q[1] - y0) * sc) for q in poly)
-            f.write("\\filldraw[fill=%s, draw=black, line width=0.15pt] %s -- cycle;\n" % (fill, pts))
+    L = boxwire(D)
+    for _, p3, g in proj:
+        # the two absorbing groups are shaded, the physical region is white
+        fill = "black!12" if g in (3, 4) else "white"
+        L.append("\\filldraw[fill=%s, draw=black, line width=0.15pt] %s -- cycle;"
+                 % (fill, " -- ".join(D(q) for q in p3)))
+    write(name, L)
     return len(proj)
 
 
-def fields():
-    """Two cuts of |E| through the antenna at its resonance."""
+def slice3d(segs, zcut, plane, patch, name="slice3d.tikz"):
+    """One cut plane in the same scene, with its contours drawn on it.
+
+    The contours are computed in the two dimensions of the plane itself, so
+    the lines are exact; only the projection is shared. The plane is opaque
+    and spans the interior, which is why the domain outline stands off it by
+    the thickness of the absorbing layer.
+    """
+    _, D = view()
+    x0, x1, y0, y1 = plane
+    pxa, pxb, pya, pyb, ph = patch
+    L = boxwire(D)
+    L.append("\\filldraw[fill=white, draw=black, line width=0.3pt] %s -- cycle;"
+             % " -- ".join(D(q) for q in [(x0, y0, zcut), (x1, y0, zcut),
+                                          (x1, y1, zcut), (x0, y1, zcut)]))
+    for p, q in segs:
+        L.append("\\draw[line width=0.3pt] %s -- %s;"
+                 % (D((p[0], p[1], zcut)), D((q[0], q[1], zcut))))
+    L.append("\\draw[line width=0.8pt] %s -- cycle;"
+             % " -- ".join(D(q) for q in [(pxa, pya, ph), (pxb, pya, ph),
+                                          (pxb, pyb, ph), (pxa, pyb, ph)]))
+    write(name, L)
+    return len(segs)
+
+
+def fields(freq):
+    """A cut of |E| through the middle of the substrate at the resonance."""
     vtk = os.path.join(HERE, "_field.vtk")
-    run("mesh %s\n%ssweep lin 2.45e9 2.45e9 1\nfield %s 2.45e9\n" % (MESH, SUB, vtk))
+    run("mesh %s\n%ssweep lin %.6e %.6e 1\nfield %s %.6e\n" % (MESH, SUB, freq, freq, vtk, freq))
     cen, mag = read_vtk(vtk)
     os.remove(vtk)
-    h = 0.00157
-    lv = [0.35, 0.55, 0.75, 0.9]
-    # inside the substrate, looking down on the patch
-    bx, nu, nv = (0.012, 0.078, 0.022, 0.078), 90, 78
-    acc = grid_idw(cen, mag, 2, 0.0, h, 0, 1, nu, nv, bx, 0.005, -20.0)
-    write_grid("field_xy.dat", acc, bx, nu, nv, 1000.0, -20.0)
-    nrm = [[(m + 20.0) / 20.0 for m in r] for r in acc]
-    write_contours("cont_xy.dat", contours(nrm, bx, nu, nv, 1000.0, lv))
-    # vertical cut along the resonant direction, through the middle of the
-    # patch: the half wave in the substrate and the fringing over both edges
-    bz, nu, nv = (0.022, 0.078, 0.0, 0.008), 90, 40
-    acc = grid_idw(cen, mag, 0, 0.038, 0.052, 1, 2, nu, nv, bz, 0.0035, -25.0)
-    write_grid("field_xz.dat", acc, bz, nu, nv, 1000.0, -25.0)
-    nrm = [[(m + 25.0) / 25.0 for m in r] for r in acc]
-    write_contours("cont_xz.dat", contours(nrm, bz, nu, nv, 1000.0, lv))
+    # the interior of the domain, that is everything the absorbing ring leaves
+    t, sx, sy = PMLT / 1000.0, 0.090, 0.100
+    plane = (PMLT, 90.0 - PMLT, PMLT, 100.0 - PMLT)
+    bx, nu, nv = (t, sx - t, t, sy - t), 90, 90
+    acc = grid_idw(cen, mag, 2, 0.0, SUBH, 0, 1, nu, nv, bx, 0.005, -20.0)
+    segs = contours([[(m + 20.0) / 20.0 for m in r] for r in acc], bx, nu, nv,
+                    1000.0, [0.35, 0.55, 0.75, 0.9])
+    return slice3d(segs, H / 2.0, plane, (20.8, 69.2, 31.6, 68.4, H))
 
 
 if __name__ == "__main__":
     if not os.path.exists(BIN):
-        sys.exit("build the release binary first")
+        sys.exit("build first: cargo build --release")
     conditioning()
-    sweep()
-    fields()
-    print(mesh_cut(), 'cut polygons,', mesh3d(), '3d faces')
-    print("wrote cond.dat, patch.dat, field and contour grids")
+    fr = sweep()
+    print("%d 3d faces, %d contour segments, resonance %.3f GHz"
+          % (mesh3d(), fields(fr), fr / 1e9))
+    print("wrote cond.dat, patch.dat, mesh3d.tikz and slice3d.tikz")

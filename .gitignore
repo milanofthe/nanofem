@@ -4,3 +4,5 @@ models/patch.vtk
 report/*.aux
 report/*.log
 report/*.out
+
+__pycache__/

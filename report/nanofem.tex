@@ -311,8 +311,9 @@ size of a structure and moves every resonance down. Nothing in the output
 marks this: the scattering parameters remain passive, reciprocal and smooth,
 the pivot spread and the residual stay small, and the only symptom is that
 the answer is wrong. The reference antenna in section~\ref{sec:results}
-resonates at \(2.48\) GHz on its default mesh and at \(2.50\) GHz on a mesh
-refined by a factor of one and a half. Mesh convergence has to be established by
+resonates at \(2.48\) GHz on a mesh graded from \(3\) to \(9\) mm and at
+\(2.50\) GHz on the mesh of section~\ref{sec:results}, refined by a factor
+of one and a half. Mesh convergence has to be established by
 running two densities, since no diagnostic in the solver can substitute for
 it.
 \end{fieldnote}
@@ -587,7 +588,7 @@ reports.
 The reference model is an edge fed microstrip patch antenna on a
 \(1.57\) mm substrate of \(\varepsilon_r = 2.2\), terminated by a
 perfectly matched layer and meshed by Gmsh into
-\(10668\) tetrahedra and \(11292\) unknowns.
+\(37676\) tetrahedra and \(41468\) unknowns.
 
 \begin{figure}[H]
 \centering
@@ -595,10 +596,10 @@ perfectly matched layer and meshed by Gmsh into
 \input{data/mesh3d.tikz}
 \end{tikzpicture}
 \caption{The mesh, cut in half at \(y = 50\) mm and drawn back to front with
-opaque faces. The thin layer at the bottom is the substrate, the block above
-it is the air region, and the shaded ring and cap are the perfectly matched
-layer. The element size follows a distance field on the patch and the feed,
-growing from \(3\) mm at the metal to \(9\) mm at the outer corners, which
+opaque faces, inside the outline of the full domain. The thin layer at the
+bottom is the substrate, the block above it is the air region, and the
+shaded ring and cap are the perfectly matched layer. The element size follows a distance field on the patch and the feed,
+growing from \(2\) mm at the metal to \(5.5\) mm at the outer corners, which
 keeps the aspect ratio bounded through the transition out of the
 \(1.57\) mm substrate. A uniform maximum size instead produces slivers
 spanning the air region and moves the resonance by two percent.}
@@ -614,42 +615,27 @@ spanning the air region and moves the resonance by two percent.}
 \end{axis}
 \end{tikzpicture}
 \caption{Reflection of the reference antenna. The resonance appears as a dip
-at \(2.48\) GHz on this mesh, against a design value of \(2.45\) GHz.
-Refining the mesh moves it to \(2.50\) GHz, so the discretization error is
-still the largest term.}
+at \(2.50\) GHz, against a design value of \(2.45\) GHz. A mesh coarsened
+by a factor of one and a half puts it at \(2.48\) GHz, so the
+discretization error is still the largest term.}
 \label{fig:patch}
 \end{figure}
 
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[font=\footnotesize, baseline]
-\begin{axis}[bwaxis, grid=none, width=0.45\textwidth, height=0.42\textwidth,
-  xlabel={$x$ / mm}, ylabel={$y$ / mm},
-  title={\footnotesize substrate, $z = h/2$}, enlargelimits=false]
-\addplot[black, line width=0.35pt] table[x=x, y=y] {data/cont_xy.dat};
-\addplot[black, line width=0.8pt] coordinates
-  {(20.8,31.6) (69.2,31.6) (69.2,68.4) (20.8,68.4) (20.8,31.6)};
-\end{axis}
-\end{tikzpicture}\hfill
-\begin{tikzpicture}[font=\footnotesize, baseline]
-\begin{axis}[bwaxis, grid=none, width=0.45\textwidth, height=0.42\textwidth,
-  xlabel={$y$ / mm}, ylabel={$z$ / mm},
-  title={\footnotesize cut at $x = 45$ mm}, enlargelimits=false]
-\addplot[black, line width=0.35pt] table[x=x, y=y] {data/cont_xz.dat};
-\addplot[black, line width=1.0pt] coordinates {(22,0) (78,0)};
-\addplot[black, line width=1.0pt] coordinates {(31.6,1.57) (68.4,1.57)};
-\end{axis}
+\begin{tikzpicture}
+\input{data/slice3d.tikz}
 \end{tikzpicture}
-\caption{Contours of the electric field magnitude at the resonance, at
-\(-11\), \(-7\), \(-4\) and \(-2\) dB below the peak of each cut. Left, a
-horizontal cut through the middle of the substrate with the patch outline
-drawn: the field is confined under the patch and forms the half wave along
-\(y\) that sets the resonant length, with maxima at the two radiating edges
-and a null across the middle. Right, a vertical cut along the resonant
-direction through the middle of the patch, with the ground plane and the
-patch as the heavy lines: the same half wave appears in the substrate, and
-the field that escapes past the two patch edges is the fringing that
+\caption{Contours of the electric field magnitude at the resonance, on a
+horizontal cut through the middle of the substrate, at \(-11\), \(-7\),
+\(-4\) and \(-2\) dB below the peak of the cut. The view, the scale and
+the outlined box are those of figure~\ref{fig:mesh}, so the two are the
+same scene: the box is the meshed domain, and the plane stands off it by the
+thickness of the absorbing layer. The heavy rectangle is the patch. The
+field is confined under the patch and forms the half wave along \(y\) that
+sets the resonant length, with maxima at the two radiating edges and a null
+across the middle. What escapes past those edges is the fringing that
 radiates.}
 \label{fig:field}
 \end{figure}

@@ -18,23 +18,40 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 BIN = os.path.join(ROOT, "target", "release", "nanofem")
-MESH = os.path.join(ROOT, "models", "patch.msh")
-SUB = ("mat sub eps 2.2 tand 0.001\nmat sub_pml eps 2.2 tand 0.001\n"
-       "pml sub_pml 3 3 3\npml air_pml 3 3 3\npec pec\n"
-       "port 1 feed 0 0 1 200\n")
-
-# The 3d figures are one scene seen from one place: same direction, same
-# millimetres per millimetre, same origin, so the mesh and the field cut
-# overlay. Geometry in mm, as in models/patch.geo.
+# Every 3d figure is one scene seen from one place: same direction, same
+# millimetres per millimetre, same origin. Both models are described the same
+# way and run through the same renders. Geometry in mm, as in the .geo files.
+AZ, EL = 35.0, 20.0
 H, SUBH, PMLT = 1.57, 0.00157, 10.0
-DOM = (0.0, 90.0, 0.0, 100.0, 0.0, 31.57)
-AZ, EL, WIDTH = 35.0, 20.0, 138.0
+LEVELS, FLOOR = [0.3, 0.5, 0.7, 0.9], -25.0
 
-# the shielded line, from models/microstrip.geo
-LMESH = os.path.join(ROOT, "models", "microstrip.msh")
-LSUB = ("mat sub eps 2.2\npec pec\n"
-        "port 1 p1 0 0 1 50.5\nport 2 p2 0 0 1 50.5\n")
-LDOM, LW, LWIDTH = (0.0, 44.0, 0.0, 20.0, 0.0, 9.57), 4.8, 104.0
+PATCH = dict(
+    tag="patch",
+    mesh=os.path.join(ROOT, "models", "patch.msh"),
+    deck=("mat sub eps 2.2 tand 0.001\nmat sub_pml eps 2.2 tand 0.001\n"
+          "pml sub_pml 3 3 3\npml air_pml 3 3 3\npec pec\n"
+          "port 1 feed 0 0 1 200\n"),
+    box=(0.0, 90.0, 0.0, 100.0, 0.0, 31.57),
+    inset=PMLT,
+    width=132.0,
+    # the shading means the same in both models: substrate dark, absorbing
+    # layer faint, plain air white
+    shade={1: "black!22", 3: "black!22", 4: "black!8"},
+    metal=[(20.8, 31.6), (69.2, 68.4)],
+    radius=0.005,
+)
+LINE = dict(
+    tag="line",
+    mesh=os.path.join(ROOT, "models", "microstrip.msh"),
+    deck=("mat sub eps 2.2\npec pec\n"
+          "port 1 p1 0 0 1 50.5\nport 2 p2 0 0 1 50.5\n"),
+    box=(0.0, 44.0, 0.0, 20.0, 0.0, 9.57),
+    inset=0.0,
+    width=104.0,
+    shade={1: "black!22"},
+    metal=[(0.0, 7.6), (44.0, 12.4)],
+    radius=0.0015,
+)
 
 
 def run(deck, keep_stderr=False):
@@ -53,7 +70,8 @@ def conditioning():
     freqs = ["1e6", "3e6", "1e7", "3e7", "1e8", "3e8", "1e9", "2.4e9", "5e9", "1e10"]
     rows = []
     for f in freqs:
-        err = run("mesh %s\n%ssweep lin %s %s 1\n" % (MESH, SUB, f, f), keep_stderr=True)
+        err = run("mesh %s\n%ssweep lin %s %s 1\n" % (PATCH["mesh"], PATCH["deck"], f, f),
+                  keep_stderr=True)
         line = [l for l in err.splitlines() if "pivot spread" in l][0]
         rows.append((f, line.split("spread ")[1].split(",")[0]))
     # the unequilibrated column is measured with equilibration disabled in the
@@ -69,7 +87,7 @@ def conditioning():
 
 def sweep():
     """Reflection of the reference antenna, returning where it resonates."""
-    out = run("mesh %s\n%ssweep lin 2.1e9 2.8e9 36\n" % (MESH, SUB))
+    out = run("mesh %s\n%ssweep lin 2.1e9 2.8e9 36\n" % (PATCH["mesh"], PATCH["deck"]))
     rows = []
     for line in out.splitlines():
         if line.startswith("#") or not line.strip():
@@ -154,9 +172,9 @@ def contours(acc, bounds, nu, nv, scale, levels):
     return [((a[0] * scale, a[1] * scale), (b[0] * scale, b[1] * scale)) for a, b in segs]
 
 
-def read_msh():
-    """Nodes and tagged tetrahedra of the reference mesh, in mm."""
-    ls = open(MESH).read().splitlines()
+def read_msh(path):
+    """Nodes and tagged tetrahedra of a mesh, in mm."""
+    ls = open(path).read().splitlines()
     i = ls.index("$Nodes")
     pos = {}
     for k in range(int(ls[i + 1])):
@@ -248,18 +266,19 @@ def write(name, lines):
                 + "\n".join(lines) + "\n")
 
 
-def mesh3d(name="mesh3d.tikz", cut=50.0):
-    """Cutaway render of the mesh as painter sorted, filled polygons.
+def mesh3d(name, mesh, box, width, ax, at, shade):
+    """Cutaway render of a mesh as painter sorted, filled polygons.
 
-    Half the domain is removed, the boundary faces of what remains are
-    projected, sorted back to front and written as tikz paths. Filling each
-    face opaque is what makes the interior read as solid rather than as a
-    wireframe. The domain is outlined first, so what the cut took away stays
-    visible as an empty box.
+    Everything on the near side of the cut is removed, the boundary faces of
+    what remains are projected, sorted back to front and written as tikz
+    paths. Filling each face opaque is what makes the interior read as solid
+    rather than as a wireframe. The domain is outlined first, so what the cut
+    took away stays visible as an empty box.
     """
-    pos, tets = read_msh()
-    depth, D = scene(DOM, WIDTH)
-    keep = [(t, g) for t, g in tets if sum(pos[v][1] for v in t) / 4.0 <= cut]
+    pos, tets = read_msh(mesh)
+    depth, D = scene(box, width)
+    keep = [(t, g) for t, g in tets
+            if sum(pos[v][ax] for v in t) / 4.0 <= at]
     faces = {}
     for t, g in keep:
         for f in ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)):
@@ -275,10 +294,9 @@ def mesh3d(name="mesh3d.tikz", cut=50.0):
         p3 = [pos[v] for v in k]
         proj.append((sum(depth(q) for q in p3) / 3.0, p3, g))
     proj.sort(key=lambda r: r[0])
-    L = draw(D, edges(DOM), 0.25, ", black!40")
+    L = draw(D, edges(box), 0.25, ", black!40")
     for _, p3, g in proj:
-        # the two absorbing groups are shaded, the physical region is white
-        L.append(filled(D, p3, "black!12" if g in (3, 4) else "white", 0.15))
+        L.append(filled(D, p3, shade.get(g, "white"), 0.15))
     write(name, L)
     return len(proj)
 
@@ -307,35 +325,56 @@ def cut3d(name, box, width, ax, at, plane, to3d, segs, marks):
     return len(segs)
 
 
-def fields(freq):
-    """A cut of |E| through the middle of the substrate at the resonance."""
+def renders(m, freq):
+    """The three renders every model gets, in one scene.
+
+    The mesh is cut on the same plane the vertical field cut lies in, so the
+    two figures show the same face of the same box. The horizontal cut sits
+    in the middle of the substrate. Both cuts carry the metal as heavy lines
+    and use the same contour levels, so the two models are read the same way.
+    """
+    x0, x1 = m["inset"], m["box"][1] - m["inset"]
+    y0, y1 = m["inset"], m["box"][3] - m["inset"]
+    z1 = m["box"][5] - m["inset"]
+    xc, zc = (x0 + x1) / 2.0, H / 2.0
+    (mx0, my0), (mx1, my1) = m["metal"]
+    metal = [[(mx0, my0, H), (mx1, my0, H), (mx1, my1, H), (mx0, my1, H),
+              (mx0, my0, H)]]
+    n = mesh3d(m["tag"] + "mesh.tikz", m["mesh"], m["box"], m["width"],
+               0, xc, m["shade"])
     vtk = os.path.join(HERE, "_field.vtk")
-    run("mesh %s\n%ssweep lin %.6e %.6e 1\nfield %s %.6e\n" % (MESH, SUB, freq, freq, vtk, freq))
+    run("mesh %s\n%ssweep lin %.6e %.6e 1\nfield %s %.6e\n"
+        % (m["mesh"], m["deck"], freq, freq, vtk, freq))
     cen, mag = read_vtk(vtk)
     os.remove(vtk)
-    # the interior of the domain, that is everything the absorbing ring leaves
-    t = PMLT / 1000.0
-    x0, x1 = PMLT, DOM[1] - PMLT
-    y0, y1 = PMLT, DOM[3] - PMLT
-    zc = H / 2.0
-    bx, nu, nv = (t, 0.090 - t, t, 0.100 - t), 90, 90
-    acc = grid_idw(cen, mag, 2, 0.0, SUBH, 0, 1, nu, nv, bx, 0.005, -20.0)
-    segs = contours([[(m + 20.0) / 20.0 for m in r] for r in acc], bx, nu, nv,
-                    1000.0, [0.35, 0.55, 0.75, 0.9])
-    patch = [(20.8, 31.6, H), (69.2, 31.6, H), (69.2, 68.4, H), (20.8, 68.4, H),
-             (20.8, 31.6, H)]
-    return cut3d("slice3d.tikz", DOM, WIDTH, 2, zc,
-                 [(x0, y0, zc), (x1, y0, zc), (x1, y1, zc), (x0, y1, zc)],
-                 lambda q: (q[0], q[1], zc), segs, [patch])
+    r, k = m["radius"], -FLOOR
+
+    def cut(name, ax, lo, hi, u, v, bounds, plane, to3d, marks):
+        nu, nv = 90, 90
+        acc = grid_idw(cen, mag, ax, lo, hi, u, v, nu, nv, bounds, r, FLOOR)
+        segs = contours([[(q + k) / k for q in row] for row in acc],
+                        bounds, nu, nv, 1000.0, LEVELS)
+        return cut3d(name, m["box"], m["width"], ax if ax != 2 else 2,
+                     zc if ax == 2 else xc, plane, to3d, segs, marks)
+
+    # horizontal, through the middle of the substrate
+    n += cut(m["tag"] + "h.tikz", 2, 0.0, SUBH, 0, 1,
+             (x0 / 1000.0, x1 / 1000.0, y0 / 1000.0, y1 / 1000.0),
+             [(x0, y0, zc), (x1, y0, zc), (x1, y1, zc), (x0, y1, zc)],
+             lambda q: (q[0], q[1], zc), metal)
+    # vertical, across the structure on the plane the mesh is cut at
+    ground = [[(xc, y0, 0.0), (xc, y1, 0.0)],
+              [(xc, max(my0, y0), H), (xc, min(my1, y1), H)]]
+    n += cut(m["tag"] + "v.tikz", 0, xc / 1000.0 - 3 * r, xc / 1000.0 + 3 * r,
+             1, 2, (y0 / 1000.0, y1 / 1000.0, 0.0, z1 / 1000.0),
+             [(xc, y0, 0.0), (xc, y1, 0.0), (xc, y1, z1), (xc, y0, z1)],
+             lambda q: (xc, q[0], q[1]), ground)
+    return n
 
 
-def line():
-    """The shielded microstrip line: reflection over the band, and the mode.
-
-    The cut is transverse, halfway along the line, since that is where the
-    field of a uniform line is worth drawing.
-    """
-    out = run("mesh %s\n%ssweep lin 1e9 5e9 21\n" % (LMESH, LSUB))
+def linesweep():
+    """Reflection and transmission of the shielded line over its band."""
+    out = run("mesh %s\n%ssweep lin 1e9 5e9 21\n" % (LINE["mesh"], LINE["deck"]))
     with open(os.path.join(HERE, "line.dat"), "w") as f:
         f.write("f s11 s21\n")
         for ln in out.splitlines():
@@ -344,23 +383,6 @@ def line():
             v = [float(x) for x in ln.split()]
             db = lambda a, b: 20 * math.log10(max(math.hypot(a, b), 1e-12))
             f.write("%.6e %.4f %.4f\n" % (v[0], db(v[1], v[2]), db(v[3], v[4])))
-    vtk = os.path.join(HERE, "_line.vtk")
-    run("mesh %s\n%ssweep lin 5e9 5e9 1\nfield %s 5e9\n" % (LMESH, LSUB, vtk))
-    cen, mag = read_vtk(vtk)
-    os.remove(vtk)
-    lx, ly, lz = LDOM[1], LDOM[3], LDOM[5]
-    xc, sy0, sy1 = lx / 2.0, (ly - LW) / 2.0, (ly + LW) / 2.0
-    bz, nu, nv = (0.0, ly / 1000.0, 0.0, lz / 1000.0), 80, 60
-    acc = grid_idw(cen, mag, 0, xc / 1000.0 - 0.003, xc / 1000.0 + 0.003,
-                   1, 2, nu, nv, bz, 0.0012, -30.0)
-    segs = contours([[(m + 30.0) / 30.0 for m in r] for r in acc], bz, nu, nv,
-                    1000.0, [0.3, 0.5, 0.7, 0.9])
-    # the strip runs the length of the box, so the plane cuts it in two
-    strip = [[(0.0, sy0, H), (lx, sy0, H), (lx, sy1, H), (0.0, sy1, H),
-              (0.0, sy0, H)]]
-    return cut3d("line3d.tikz", LDOM, LWIDTH, 0, xc,
-                 [(xc, 0.0, 0.0), (xc, ly, 0.0), (xc, ly, lz), (xc, 0.0, lz)],
-                 lambda q: (xc, q[0], q[1]), segs, strip)
 
 
 if __name__ == "__main__":
@@ -368,8 +390,7 @@ if __name__ == "__main__":
         sys.exit("build first: cargo build --release")
     conditioning()
     fr = sweep()
-    nl = line()
-    print("%d 3d faces, %d and %d contour segments, resonance %.3f GHz"
-          % (mesh3d(), fields(fr), nl, fr / 1e9))
-    print("wrote cond.dat, patch.dat, line.dat, mesh3d.tikz, slice3d.tikz"
-          " and line3d.tikz")
+    linesweep()
+    print("patch %d, line %d faces and segments, resonance %.3f GHz"
+          % (renders(PATCH, fr), renders(LINE, 5e9), fr / 1e9))
+    print("wrote cond.dat, patch.dat, line.dat and six tikz figures")

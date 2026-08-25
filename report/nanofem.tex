@@ -587,58 +587,60 @@ reports.
 
 \subsection{A patch antenna}
 
-The reference model is an edge fed microstrip patch antenna on a
-\(1.57\) mm substrate of \(\varepsilon_r = 2.2\), terminated by a
-perfectly matched layer and meshed by Gmsh into
-\(37676\) tetrahedra and \(41468\) unknowns.
+The first model is an edge fed microstrip patch antenna on a
+\(1.57\) mm substrate of \(\varepsilon_r = 2.2\), \(90\) by
+\(100\) mm in plan with \(20\) mm of air above the substrate, terminated
+by a perfectly matched layer \(10\) mm thick around the footprint and on
+top. The element size follows a distance field on the patch and the feed,
+growing from \(2\) mm at the metal to \(5.5\) mm at the outer corners,
+which keeps the aspect ratio bounded through the transition out of the
+substrate. That gives \(37676\) tetrahedra and \(41468\) unknowns, and a
+sweep of 36 frequencies over the resonance takes \(3.7\) s per frequency.
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}
-\input{data/mesh3d.tikz}
+\input{data/patchmesh.tikz}
 \end{tikzpicture}
-\caption{The mesh, cut in half at \(y = 50\) mm and drawn back to front with
-opaque faces, inside the outline of the full domain. The thin layer at the
-bottom is the substrate, the block above it is the air region, and the
-shaded ring and cap are the perfectly matched layer. The element size follows a distance field on the patch and the feed,
-growing from \(2\) mm at the metal to \(5.5\) mm at the outer corners, which
-keeps the aspect ratio bounded through the transition out of the
-\(1.57\) mm substrate.}
-\label{fig:mesh}
+\caption{The mesh, cut at \(x = 45\) mm through the feed and drawn back to
+front with opaque faces, inside the outline of the full domain. What the cut
+took away stays visible as the empty half of the box. The dark layer at the
+bottom is the substrate and the faint shell is the perfectly matched
+layer.}
+\label{fig:patchmesh}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\input{data/patchh.tikz}
+\end{tikzpicture}
+\caption{A horizontal cut of the electric field magnitude through the middle of the substrate, at the resonance. The view, the scale and the outlined box are those of figure~\ref{fig:patchmesh}, so every figure of this model is the same scene seen from the same place. The plane is opaque and the box outline is cut against it. Contours at \(-17.5\), \(-12.5\), \(-7.5\) and \(-2.5\) dB below the peak of the cut. The heavy rectangle is the patch. The field is confined under it and forms the half wave along \(y\) that sets the resonant length, with maxima at the two radiating edges and a null across the middle.}
+\label{fig:patchh}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\input{data/patchv.tikz}
+\end{tikzpicture}
+\caption{A vertical cut of the same field on the plane the mesh is cut at. The view, the scale and the outlined box are those of figure~\ref{fig:patchmesh}, so every figure of this model is the same scene seen from the same place. The plane is opaque and the box outline is cut against it. Contours at \(-17.5\), \(-12.5\), \(-7.5\) and \(-2.5\) dB below the peak of the cut. The heavy lines are the ground plane and the patch. The half wave appears again in the substrate, and the two lobes reaching into the air past the patch edges are the fringing that radiates.}
+\label{fig:patchv}
 \end{figure}
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}
 \begin{axis}[bwaxis, width=0.72\textwidth, height=0.34\textwidth,
-  xlabel={frequency / GHz}, ylabel={$|S_{11}|$ / dB}]
+  xlabel={frequency / GHz}, ylabel={dB}]
 \addplot[black, thick] table[x expr={\thisrow{f}/1e9}, y=db] {data/patch.dat};
 \end{axis}
 \end{tikzpicture}
-\caption{Reflection of the reference antenna. The resonance appears as a dip
-at \(2.50\) GHz, against a design value of \(2.45\) GHz. A mesh coarsened
-by a factor of one and a half puts it at \(2.48\) GHz, so the
-discretization error is still the largest term.}
-\label{fig:patch}
-\end{figure}
-
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}
-\input{data/slice3d.tikz}
-\end{tikzpicture}
-\caption{Contours of the electric field magnitude at the resonance, on a
-horizontal cut through the middle of the substrate, at \(-11\), \(-7\),
-\(-4\) and \(-2\) dB below the peak of the cut. The view, the scale and
-the outlined box are those of figure~\ref{fig:mesh}, so the two are the
-same scene: the box is the meshed domain, and the plane stands off it by the
-thickness of the absorbing layer. The heavy rectangle is the patch. The
-field is confined under the patch and forms the half wave along \(y\) that
-sets the resonant length, with maxima at the two radiating edges and a null
-across the middle. What escapes past those edges is the fringing that
-radiates.}
-\label{fig:field}
+\caption{Reflection of the antenna. The resonance appears as a dip at
+\(2.50\) GHz, against a design value of \(2.45\) GHz. A mesh coarsened by
+a factor of one and a half puts it at \(2.48\) GHz, so the discretization
+error is still the largest term.}
+\label{fig:patchs}
 \end{figure}
 
 \begin{table}[H]
@@ -653,53 +655,70 @@ numeric factorization & 3.7 s & per frequency \\
 triangular solve and refinement & 60 ms & per frequency and port \\
 \bottomrule
 \end{tabular}
-\caption{Runtime by stage on the reference antenna, on one core of an
-Apple M3. The totals are wall clock, the split between stages comes from a
-sampling profile of the same run. The factorization is 98 percent of the
-work per frequency, so the fill of the ordering sets the runtime and the
-assembly does not. A sweep runs its frequencies in parallel, one
-factorization each, which is why the memory and not the arithmetic caps the
-thread count.}
+\caption{Runtime by stage on the patch antenna, on one core of an Apple M3.
+The totals are wall clock, the split between stages comes from a sampling
+profile of the same run. The factorization is 98 percent of the work per
+frequency, so the fill of the ordering sets the runtime and the assembly does
+not. A sweep runs its frequencies in parallel, one factorization each, which
+is why the memory and not the arithmetic caps the thread count.}
 \label{tab:time}
 \end{table}
 
 \subsection{A shielded line}
 
 The second model is a microstrip line inside a closed metal box: a
-\(4.8\) mm strip on the same \(1.57\) mm substrate, \(44\) mm long, in a
-\(20\) mm wide enclosure with \(8\) mm of air above the substrate. The
+\(4.8\) mm strip on the same \(1.57\) mm substrate, \(44\) mm long, in
+a \(20\) mm wide enclosure with \(8\) mm of air above the substrate. The
 ground plane, the strip, the lid and the two side walls are perfect
 conductors; a lumped port at each end reaches from the ground plane to the
-strip. The mesh grades from \(0.6\) mm on the strip to \(4\) mm at the
-shield, \(22775\) tetrahedra and \(23439\) unknowns, and the sweep of 21
-frequencies from \(1\) to \(5\) GHz takes \(8.1\) s on eight threads.
+strip. The element size grades from \(0.6\) mm on the strip to \(4\) mm
+at the shield, about three elements through the substrate. That gives
+\(22775\) tetrahedra and \(23439\) unknowns, and a sweep of 21
+frequencies from \(1\) to \(5\) GHz takes \(8.1\) s on eight
+threads.
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}
-\input{data/line3d.tikz}
+\input{data/linemesh.tikz}
 \end{tikzpicture}
-\caption{Contours of the electric field magnitude at \(5\) GHz on a
-transverse cut halfway along the line, at \(-21\), \(-15\), \(-9\) and
-\(-3\) dB below the peak of the cut. The heavy lines are the strip. The
-field is confined to the substrate under the strip and fringes past its two
-edges, and it is \(30\) dB down at the side walls and the lid.}
-\label{fig:line}
+\caption{The mesh, cut at \(x = 22\) mm halfway along the line and drawn back
+to front with opaque faces, inside the outline of the full domain. What the
+cut took away stays visible as the empty half of the box. The dark layer at
+the bottom is the substrate; this model has no absorbing layer.}
+\label{fig:linemesh}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\input{data/lineh.tikz}
+\end{tikzpicture}
+\caption{A horizontal cut of the electric field magnitude through the middle of the substrate, at \(5\) GHz. The view, the scale and the outlined box are those of figure~\ref{fig:linemesh}, so every figure of this model is the same scene seen from the same place. The plane is opaque and the box outline is cut against it. Contours at \(-17.5\), \(-12.5\), \(-7.5\) and \(-2.5\) dB below the peak of the cut. The heavy rectangle is the strip. The field is confined under it along the whole length of the line, which is what a uniform line carrying one mode looks like.}
+\label{fig:lineh}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\input{data/linev.tikz}
+\end{tikzpicture}
+\caption{A vertical cut of the same field on the plane the mesh is cut at. The view, the scale and the outlined box are those of figure~\ref{fig:linemesh}, so every figure of this model is the same scene seen from the same place. The plane is opaque and the box outline is cut against it. Contours at \(-17.5\), \(-12.5\), \(-7.5\) and \(-2.5\) dB below the peak of the cut. The heavy lines are the ground plane and the strip. The field fills the substrate under the strip, fringes past its two edges and is \(25\) dB down at the side walls and the lid.}
+\label{fig:linev}
 \end{figure}
 
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}
 \begin{axis}[bwaxis, width=0.72\textwidth, height=0.34\textwidth,
-  xlabel={frequency / GHz}, ylabel={dB}, legend pos=south west]
+  xlabel={frequency / GHz}, ylabel={dB}]
 \addplot[black, thick] table[x expr={\thisrow{f}/1e9}, y=s11] {data/line.dat};
 \addplot[black, dashed] table[x expr={\thisrow{f}/1e9}, y=s21] {data/line.dat};
-\legend{}
 \end{axis}
 \end{tikzpicture}
-\caption{Reflection, solid, and transmission, dashed, of the line.
-Reflection stays between \(-13\) and \(-37\) dB over the band and
-transmission above \(-0.3\) dB.}
+\caption{Reflection, solid, and transmission, dashed, of the line. Reflection
+stays between \(-13\) and \(-37\) dB over the band and transmission above
+\(-0.3\) dB.}
 \label{fig:lines}
 \end{figure}
 

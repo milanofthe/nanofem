@@ -646,15 +646,19 @@ radiates.}
 \toprule
 stage & time & share \\
 \midrule
-mesh, assembly and matrix build & 16.4 ms & once \\
-symbolic analysis & 5.6 ms & once \\
-numeric factorization & 270 ms & per frequency \\
-triangular solve & 3.7 ms & per frequency and port \\
+mesh, assembly, matrix build and ordering & 35 ms & once \\
+symbolic analysis & 40 ms & once \\
+numeric factorization & 3.7 s & per frequency \\
+triangular solve and refinement & 60 ms & per frequency and port \\
 \bottomrule
 \end{tabular}
-\caption{Runtime by stage on the reference antenna. The factorization is
-99 percent of the work per frequency, so the fill of the ordering sets the
-runtime and the assembly does not.}
+\caption{Runtime by stage on the reference antenna, on one core of an
+Apple M3. The totals are wall clock, the split between stages comes from a
+sampling profile of the same run. The factorization is 98 percent of the
+work per frequency, so the fill of the ordering sets the runtime and the
+assembly does not. A sweep runs its frequencies in parallel, one
+factorization each, which is why the memory and not the arithmetic caps the
+thread count.}
 \label{tab:time}
 \end{table}
 

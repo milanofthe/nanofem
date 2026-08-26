@@ -75,6 +75,40 @@
 \end{tikzpicture}%
 \end{tcolorbox}\medskip}
 
+% Budget bar: the whole file as one divided bar, segments in file order with
+% the section names on alternating sides. Same geometry as the per section
+% bars above, so this one reads as their legend.
+% #1 total lines, #2 a list of  start/end/labelpos/level/{text}
+% level is 1 or 2 above the bar, -1 or -2 below it.
+\newcommand{\budgetbar}[2]{%
+\begin{center}
+\begin{tikzpicture}[bl/.style={align=center, font=\scriptsize, inner sep=1pt}]
+\pgfmathsetlengthmacro{\bw}{\linewidth-4pt}
+\def\bh{5mm}
+\foreach \s/\e/\a/\lv/\t [count=\i] in {#2} {
+  \pgfmathsetlengthmacro{\xa}{(\s/#1)*\bw}
+  \pgfmathsetlengthmacro{\xb}{(\e/#1)*\bw}
+  \pgfmathsetlengthmacro{\xm}{(0.5*(\s+\e)/#1)*\bw}
+  \pgfmathsetlengthmacro{\xl}{(\a/#1)*\bw}
+  \pgfmathsetlengthmacro{\yl}{abs(\lv)*6.5mm}
+  \ifodd\i\relax\fill[black!12] (\xa,0) rectangle (\xb,\bh);\fi
+  \draw[line width=0.4pt] (\xa,0) -- (\xa,\bh);
+  \ifnum\lv>0\relax
+    \pgfmathsetlengthmacro{\yk}{\bh+0.35*\yl}
+    \pgfmathsetlengthmacro{\yt}{\bh+\yl}
+    \draw[line width=0.3pt] (\xm,\bh) -- (\xm,\yk) -- (\xl,\yt);
+    \node[bl, above] at (\xl,\yt) {\t};
+  \else
+    \pgfmathsetlengthmacro{\yk}{-0.35*\yl}
+    \pgfmathsetlengthmacro{\yt}{-\yl}
+    \draw[line width=0.3pt] (\xm,0) -- (\xm,\yk) -- (\xl,\yt);
+    \node[bl, below] at (\xl,\yt) {\t};
+  \fi
+}
+\draw[line width=0.5pt] (0,0) rectangle (\bw,\bh);
+\end{tikzpicture}
+\end{center}}
+
 \title{\textbf{nanofem}\\[4pt]\large A 3D electromagnetic field solver in 1000 lines of Rust}
 \author{Milan Rother}
 \date{2026}
@@ -140,6 +174,22 @@ main & 9 & 954 \\
 \caption{Line budget by code section, in file order.}
 \label{tab:budget}
 \end{table}
+
+\begin{figure}[h]
+\budgetbar{954}{
+  0/71/65/1/{numbers and\\geometry \textbf{71}},
+  71/246/175/-1/{mesh reader and\\deck parser \textbf{175}},
+  246/459/350/1/{ordering and\\sparse \(LDL^T\) \textbf{213}},
+  459/518/470/-1/{element tables\\and output rows \textbf{59}},
+  518/591/550/1/{materials\\and PML \textbf{73}},
+  591/651/645/-2/{unknowns\\and ports \textbf{60}},
+  651/773/730/1/{assembly and\\matrix build \textbf{122}},
+  773/883/840/-1/{sweep and\\S-parameters \textbf{110}},
+  883/954/895/1/{field export\\and main \textbf{71}}}
+\caption{The same budget as one bar, with adjacent sections of the table
+grouped. Each section bar in the rest of the report is a slice of this one.}
+\label{fig:budget}
+\end{figure}
 
 The linear algebra is the largest block, at 213 lines for the ordering and
 the factorization. The input format is small in comparison, which is the
